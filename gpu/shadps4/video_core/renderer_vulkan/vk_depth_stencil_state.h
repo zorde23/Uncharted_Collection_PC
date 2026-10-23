@@ -20,23 +20,6 @@ struct EffectiveDepthStencilState {
 [[nodiscard]] inline EffectiveDepthStencilState GetEffectiveDepthStencilState(
     const AmdGpu::Regs& regs) {
     const auto& control = regs.depth_control;
-    // ucndc (GOW3_SM_DS=1, diagnosis): the plain rules SuperMedo's port uses, without this
-    // header's reasoning about which tests can have an effect.
-    static const bool plain = [] {
-        const char* env = std::getenv("GOW3_SM_DS");
-        return env && env[0] == '1';
-    }();
-    if (plain) {
-        const bool depth_valid = regs.depth_buffer.DepthValid();
-        const bool stencil_valid = regs.depth_buffer.StencilValid();
-        return {
-            .needs_attachment = depth_valid || stencil_valid,
-            .depth_test_enable = control.depth_enable && depth_valid,
-            .depth_write_enable = static_cast<bool>(control.depth_write_enable),
-            .depth_bounds_enable = static_cast<bool>(control.depth_bounds_enable),
-            .stencil_test_enable = control.stencil_enable && stencil_valid,
-        };
-    }
     const auto& render_control = regs.depth_render_control;
     const auto& render_override = regs.depth_render_override;
 

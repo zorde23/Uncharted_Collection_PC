@@ -3445,3 +3445,10 @@ void RegisterLib(Core::Loader::SymbolsResolver* sym) {
 };
 
 } // namespace Libraries::GnmDriver
+
+// uc3: GOW3_CB_WATCH (probe.c) stamps each watched write with the guest's frame (submitDone
+// calls) and the end-of-pipe flips the GPU side has reached. Diagnostic reads, no locking.
+extern "C" void gow3gpu_frame_counters(u64* submit_done, u64* eop_flips) {
+    *submit_done = Libraries::GnmDriver::frames_submitted;
+    *eop_flips = Libraries::VideoOut::EopFlipsReached();
+}

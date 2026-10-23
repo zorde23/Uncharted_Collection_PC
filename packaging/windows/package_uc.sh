@@ -23,7 +23,8 @@ fi
 [[ -n $python ]] || { echo 'Need a Windows Python 3 (python.org) or WINPYTHON=path\to\python.exe' >&2; exit 1; }
 export USERPROFILE=${USERPROFILE:-$(cygpath -w "/c/Users/$(id -un)")}
 [[ -x out/pyenv/Scripts/python.exe ]] || "$python" -m venv out/pyenv
-out/pyenv/Scripts/python.exe -m pip install -q --disable-pip-version-check pyinstaller
+# Pillow: the launcher draws the keyboard icons for the games' text (scripts/key_icons.py).
+out/pyenv/Scripts/python.exe -m pip install -q --disable-pip-version-check pyinstaller pillow
 # run.py and the scripts run inside the launcher (--run/--script): their standard modules come along.
 hidden=()
 for module in argparse base64 collections hashlib json re shutil shlex struct tempfile xml.etree.ElementTree \

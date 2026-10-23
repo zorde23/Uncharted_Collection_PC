@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <chrono>
 #include <mutex>
+#include <unordered_set>
 #include <unordered_map>
 #include <x86intrin.h>
 #include <cstdio>
@@ -92,6 +93,20 @@ struct StageBTimer {
     }
 };
 } // namespace
+
+// ucndc: GOW3_MIP_FIX_TRACE=1: an image sampled while it is a render target in the same draw
+// (with MIP_FIX the bloom reads mip N-1 and writes mip N of one image), once per image and mip
+// range (sampled and target).
+static bool FeedbackTraceFirst(u64 key) {
+    static const bool on = std::getenv("GOW3_MIP_FIX_TRACE") != nullptr;
+    if (!on) {
+        return false;
+    }
+    static std::mutex mutex;
+    static std::unordered_set<u64> seen;
+    std::scoped_lock lock{mutex};
+    return seen.size() < 400 && seen.insert(key).second;
+}
 
 static Shader::PushData MakeUserData(const AmdGpu::Regs& regs) {
     // TODO(roamic): Add support for multiple viewports and geometry shaders when ViewportIndex
@@ -1779,11 +1794,19 @@ void Rasterizer::DumpOnDraw(const GraphicsPipeline* pipeline) {
         const char* dir = std::getenv("GOW3_DUMP_DIR");
         const std::string base = dir && *dir ? dir : "out/dump";
         scheduler.EndRendering();
+        // GOW3_DUMP_MIPS=1: every mip of each image, not only mip 0 (files _m<mip> from mip 1 on).
+        static const bool dump_mips = [] {
+            const char* v = std::getenv("GOW3_DUMP_MIPS");
+            return v && v[0] == '1';
+        }();
         const auto dump_image = [&](VideoCore::Image& image, const char* tag) {
+          const u32 mips = dump_mips ? u32(image.info.resources.levels) : 1u;
+          for (u32 mip = 0; mip < mips; ++mip) {
             if (image.info.props.is_depth) {
                 return;
             }
-            const u32 w = image.info.size.width, h = image.info.size.height;
+            const u32 w = std::max(image.info.size.width >> mip, 1u),
+                      h = std::max(image.info.size.height >> mip, 1u);
             const VkDeviceSize size = VkDeviceSize(w) * h * std::max(image.info.num_bits / 8, 1u);
             const VkBufferCreateInfo buffer_ci{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
                                                .size = size,
@@ -1804,17 +1827,18 @@ void Rasterizer::DumpOnDraw(const GraphicsPipeline* pipeline) {
                             vk::AccessFlagBits2::eTransferRead);
             runtime.FlushBarriers();
             const vk::Image vk_image = image.GetImage();
-            scheduler.Record([vk_image, buffer, w, h](vk::CommandBuffer cmdbuf) {
+            scheduler.Record([vk_image, buffer, w, h, mip](vk::CommandBuffer cmdbuf) {
                 cmdbuf.copyImageToBuffer(
                     vk_image, vk::ImageLayout::eTransferSrcOptimal, vk::Buffer{buffer},
-                    vk::BufferImageCopy{.imageSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+                    vk::BufferImageCopy{.imageSubresource = {vk::ImageAspectFlagBits::eColor, mip, 0, 1},
                                         .imageExtent = {w, h, 1}});
             });
             char path[512];
-            std::snprintf(path, sizeof(path), "%s/%s%s_%03d_%llx_fmt%d_%ubit_%ux%u.raw",
+            const std::string mip_tag = mip ? std::format("_m{}", mip) : std::string{};
+            std::snprintf(path, sizeof(path), "%s/%s%s_%03d_%llx_fmt%d_%ubit_%ux%u%s.raw",
                           base.c_str(), tag_prefix.c_str(), tag, dump_index,
                           (unsigned long long)image.info.guest_address,
-                          int(image.info.pixel_format), image.info.num_bits, w, h);
+                          int(image.info.pixel_format), image.info.num_bits, w, h, mip_tag.c_str());
             std::printf("ucndc: dump %s (flags %#x, mips %u, layers %u)\n", path,
                         unsigned(image.flags), image.info.resources.levels,
                         image.info.resources.layers);
@@ -1828,6 +1852,7 @@ void Rasterizer::DumpOnDraw(const GraphicsPipeline* pipeline) {
                 }
                 vmaDestroyBuffer(allocator, buffer, allocation);
             });
+          }
         };
         for (u32 i = 0; i < AmdGpu::NUM_COLOR_BUFFERS; ++i) {
             if (cb_descs[i].first) {
@@ -3499,6 +3524,20 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
             // target in feedback loop. Depth images are excluded because they can't be bound as
             // storage and feedback loop doesn't make sense for them
             if ((binding.force_general || binding.is_target) && !image.info.props.is_depth) {
+                if (binding.is_target &&
+                    FeedbackTraceFirst((image.image_uid << 16) | (u64(desc.view_info.range.base.level) << 8) |
+                                       (u64(desc.view_info.range.extent.levels) << 1))) {
+                    std::printf("MIP_FIX trace: sampled while a render target: %#llx %ux%u fmt %s levels %u, "
+                                "sampled mips %u+%u, layout %s, %s, feedback usage %d\n",
+                                (unsigned long long)image.info.guest_address, image.info.size.width,
+                                image.info.size.height, vk::to_string(image.info.pixel_format).c_str(),
+                                u32(image.info.resources.levels), u32(desc.view_info.range.base.level),
+                                u32(desc.view_info.range.extent.levels),
+                                vk::to_string(image.backing->state.layout).c_str(),
+                                instance.IsAttachmentFeedbackLoopLayoutSupported()
+                                    ? "feedback loop layout" : "general",
+                                int(bool(image.usage_flags & vk::ImageUsageFlagBits::eAttachmentFeedbackLoopEXT)));
+                }
                 if (instance.IsAttachmentFeedbackLoopLayoutSupported() && image.binding.is_target) {
                     barrier |= runtime.Transit(
                         &image, vk::ImageLayout::eAttachmentFeedbackLoopOptimalEXT,
@@ -3618,34 +3657,7 @@ void Rasterizer::BindSamplers(const Shader::Info& stage, const PreparedStage* pr
                         Regs().ta_bc_base.Address());
             ssharp = AmdGpu::Sampler{};
         }
-        // ucndc (GOW3_TEX_LOD_BIAS=<float>, test): extra LOD bias for the linear-mip non-depth
-        // samplers of the shaders in GOW3_TEX_LOD_BIAS_PS (hex hashes, default the desert sand
-        // material). Applied to every shader it blacked the screen: render targets with
-        // unwritten lower mips. Off when absent or 0; the sampler cache keys on the extra bias.
-        static const float tex_lod_bias = [] {
-            const char* env = std::getenv("GOW3_TEX_LOD_BIAS");
-            return env ? static_cast<float>(std::atof(env)) : 0.0f;
-        }();
-        static const std::vector<u32> tex_lod_bias_ps = [] {
-            const char* env = std::getenv("GOW3_TEX_LOD_BIAS_PS");
-            std::string list = env ? env : "6f7f9e2d,3aac2caf";
-            std::vector<u32> out;
-            for (size_t at = 0; at < list.size();) {
-                const size_t end = std::min(list.find(',', at), list.size());
-                if (end > at) {
-                    out.push_back(static_cast<u32>(std::strtoul(list.substr(at, end - at).c_str(), nullptr, 16)));
-                }
-                at = end + 1;
-            }
-            return out;
-        }();
-        const bool mipmapped =
-            tex_lod_bias != 0.0f &&
-            ssharp.mip_filter.Value() == AmdGpu::MipFilter::Linear &&
-            std::find(tex_lod_bias_ps.begin(), tex_lod_bias_ps.end(), u32(stage.pgm_hash)) !=
-                tex_lod_bias_ps.end();
-        const float extra_bias =
-            sampler.is_depth ? 0.0f : sampler_lod_bias + (mipmapped ? tex_lod_bias : 0.0f);
+        const float extra_bias = sampler.is_depth ? 0.0f : sampler_lod_bias;
         const auto vk_sampler =
             texture_cache.GetSampler(ssharp, Regs().ta_bc_base, sampler.is_depth, extra_bias);
         if (FrameCapture::Active()) {
@@ -3954,6 +3966,13 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
             ASSERT_MSG(!image->binding.force_general,
                        "Having image both as storage and render target is unsupported");
             runtime.FlushBarriers();
+            if (FeedbackTraceFirst((image->image_uid << 16) | (u64(desc.view_info.range.base.level) << 8) |
+                                   (u64(desc.view_info.range.extent.levels) << 1) | 1)) {
+                std::printf("MIP_FIX trace: render target also sampled: %#llx %ux%u levels %u, target mip %u+%u\n",
+                            (unsigned long long)image->info.guest_address, image->info.size.width,
+                            image->info.size.height, u32(image->info.resources.levels),
+                            u32(desc.view_info.range.base.level), u32(desc.view_info.range.extent.levels));
+            }
             needs_barrier |=
                 runtime.Transit(image,
                                 instance.IsAttachmentFeedbackLoopLayoutSupported()

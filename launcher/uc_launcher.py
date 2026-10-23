@@ -10,6 +10,7 @@ Frozen with PyInstaller (packaging/windows/package_uc.sh) the same executable al
 (`--run`), the preparation scripts (`--script`) and a game without the window
 (`--play uc1|uc2|uc3`, for desktop shortcuts), so players need no Python and no terminal.
 """
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -38,7 +39,7 @@ LOG_FILE = USER_DIR / 'last_run.log'
 INPUT_FILE = DATA_DIR / 'input.ini'
 APP_NAME = 'Uncharted Collection PC'
 EXE_NAME = 'Uncharted Launcher.exe'
-VERSION = '0.3.4'
+VERSION = '0.3.5-beta8'
 RELEASES_API = 'https://api.github.com/repos/zorde23/Uncharted_Collection_PC/releases/latest'
 RELEASES_PAGE = 'https://github.com/zorde23/Uncharted_Collection_PC/releases/latest'
 NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
@@ -51,16 +52,27 @@ COMMON = {
     'GOW3_EAGER_SUBMIT_US': '1000', 'GOW3_ASYNC_SUBMIT': '1',
     'GOW3_RING_COPY_THREAD': '1', 'GOW3_DEFERRED_SUBMIT': '1', 'GOW3_RING_DEDUP': '1',
     'GOW3_READBACK_FAST': '1', 'GOW3_READBACK_FAST_WAIT': '1', 'GOW3_READBACK_FAST_SIDEQ': '1',
+    # Bloom mips keep their place when another image shares their memory (red spots, 2026-10-22).
+    'GOW3_OVERLAP_KEEP_VIEW': '1',
 }
 # key, title, executable, (status pt, status en), extra options
 GAMES = [
     ('uc1', "Uncharted: Drake's Fortune", 'eboot.bin', ('Experimental', 'Experimental'),
      {'GOW3_COMPUTE_PIPE': '1', 'GOW3_LOW_IMAGE': '1', 'GOW3_AJM_END_RULES': '1', 'GOW3_EOP_TICK_WAIT': '1',
-      'GOW3_MOUSE_AIM_U1_ALL': '1', 'GOW3_READBACK_SIDEQ': '1'}),
+      'GOW3_MOUSE_AIM_U1_ALL': '1', 'GOW3_READBACK_SIDEQ': '1',
+      # From UC3 (tested on UC1 2026-10-20: the flashlight works with them). FAULT_WRITES: crash log aid.
+      'GOW3_SYNC_SMALL_TARGETS': '1', 'GOW3_JOB_SPIN': '100', 'GOW3_JOB_SLEEP': '1', 'GOW3_MIP_FIX': '1',
+      'GOW3_SCOPE_SPLIT_SCALAR': '1', 'GOW3_DEPTH_KEEP_CLEAR': '1', 'GOW3_FAULT_WRITES': '1',
+      'GOW3_MOUSE_CAMERA_LOG': '1', 'GOW3_CB_WATCH': '1',
+      # The friend's crash (execute at 0, 2026-10-22): a binding with no handler waits, else is skipped.
+      'GOW3_UC1_BIND_RETRY': '1'}),
     ('uc2', 'Uncharted 2: Among Thieves', 'big2-ps4_Shipping.elf', ('Jogável', 'Playable'),
      # Without GOW3_COMPUTE_PIPE: with it the train carriage in the prologue falls too early. The two
      # in-order options keep the rooftop at 60 FPS; the train jump is still timing-sensitive with them.
-     {'GOW3_HLE_INORDER': '1', 'GOW3_ACB_DISPATCH_PIPE': '1', 'GOW3_READBACK_SIDEQ': '1'}),
+     {'GOW3_HLE_INORDER': '1', 'GOW3_ACB_DISPATCH_PIPE': '1', 'GOW3_READBACK_SIDEQ': '1',
+      # From UC3 (2026-10-22, Matheus); COMPUTE_PIPE stays off (train).
+      'GOW3_SYNC_SMALL_TARGETS': '1', 'GOW3_JOB_SPIN': '100', 'GOW3_JOB_SLEEP': '1', 'GOW3_MIP_FIX': '1',
+      'GOW3_SCOPE_SPLIT_SCALAR': '1', 'GOW3_DEPTH_KEEP_CLEAR': '1'}),
     # uc3 without GOW3_READBACK_SIDEQ: with it Drake's scarf jumps around in the desert (the guest
     # resumes before the graphics work behind a readback runs); no FPS difference measured.
     ('uc3', "Uncharted 3: Drake's Deception", 'big3-ps4_Shipping.elf', ('Jogável · 60 FPS', 'Playable · 60 FPS'),
@@ -117,13 +129,13 @@ TOGGLE_HELP = {
                          'Native copies in order (UC2; turn off if the prologue train fails)'),
     'GOW3_ACB_DISPATCH_PIPE': ('Compute assíncrono em ordem (UC2; desligue se o trem do prólogo falhar)',
                                'Async compute in order (UC2; turn off if the prologue train fails)'),
-    'GOW3_SYNC_SMALL_TARGETS': ('Compila na hora shaders de alvos pequenos (luz da tocha, UC3)',
-                                'Compile small-target shaders right away (torch light, UC3)'),
+    'GOW3_SYNC_SMALL_TARGETS': ('Compila na hora shaders de alvos pequenos (luz da tocha, UC1, UC2 e UC3)',
+                                'Compile small-target shaders right away (torch light, UC1, UC2 and UC3)'),
     'GOW3_JOB_SPIN': ('Threads de jobs giram menos antes de dormir (menos CPU)', 'Job threads spin less before sleeping (less CPU)'),
-    'GOW3_MIP_FIX': ('Bloom e distorção corretos (imagem não fica lavada, UC3)', 'Correct bloom and distortion (no washed-out image, UC3)'),
+    'GOW3_MIP_FIX': ('Bloom e distorção corretos (imagem não fica lavada, UC1, UC2 e UC3)', 'Correct bloom and distortion (no washed-out image, UC1, UC2 and UC3)'),
     'GOW3_MOUSE_EDGE_AIM': ('Mouse na mira pendurado e escalando (UC3)', 'Mouse aiming while hanging and climbing (UC3)'),
-    'GOW3_SCOPE_SPLIT_SCALAR': ('Névoa dos cones de luz sem cunhas pretas (UC3)', 'Light cone fog without black wedges (UC3)'),
-    'GOW3_DEPTH_KEEP_CLEAR': ('Sombras e luzes sem piscar (UC3)', 'Shadows and lights without flicker (UC3)'),
+    'GOW3_SCOPE_SPLIT_SCALAR': ('Névoa dos cones de luz sem cunhas pretas (UC1, UC2 e UC3)', 'Light cone fog without black wedges (UC1, UC2 and UC3)'),
+    'GOW3_DEPTH_KEEP_CLEAR': ('Sombras e luzes sem piscar (UC1, UC2 e UC3)', 'Shadows and lights without flicker (UC1, UC2 and UC3)'),
     'GOW3_PREP_TRUST_A1': ('Experimental: preparo de desenhos mais rápido (+FPS, UC3)', 'Experimental: faster draw preparation (+FPS, UC3)'),
     'GOW3_JOB_SLEEP': ('Threads de jobs podem dormir no gameplay (menos CPU)', 'Job threads may sleep in gameplay (less CPU)'),
 }
@@ -133,9 +145,10 @@ FIX_TOGGLES = {'GOW3_MOUSE_AIM_U1_ALL', 'GOW3_SYNC_SMALL_TARGETS', 'GOW3_MIP_FIX
 # The Uncharted engines run at 60 at most, so higher limits would do nothing.
 FPS_LIMITS = [('0', ('Sem limite (60)', 'No limit (60)')), ('30', ('30', '30')), ('60', ('60', '60'))]
 # Fixed per game, never a user switch: UC1 needs LOW_IMAGE, AJM_END_RULES and EOP_TICK_WAIT; READBACKS
-# keeps the scenery; FRAME_STATS is only a log aid; HLE_INVALIDATE follows SCALAR_COPY_HLE (texture swaps).
+# keeps the scenery; FRAME_STATS, FAULT_WRITES, MOUSE_CAMERA_LOG and CB_WATCH are only log aids; HLE_INVALIDATE follows SCALAR_COPY_HLE (texture swaps).
 FIXED = {'GOW3_READBACKS', 'GOW3_FRAME_STATS', 'GOW3_LOW_IMAGE', 'GOW3_AJM_END_RULES', 'GOW3_EOP_TICK_WAIT',
-         'GOW3_HLE_INVALIDATE'}
+         'GOW3_HLE_INVALIDATE', 'GOW3_FAULT_WRITES',
+         'GOW3_MOUSE_CAMERA_LOG', 'GOW3_CB_WATCH', 'GOW3_OVERLAP_KEEP_VIEW', 'GOW3_UC1_BIND_RETRY'}
 
 # Controls window (input.ini, read by the game: src/runtime_pad.c), ported from SuperMedo's launcher
 # (uncharted_pc, GPL). Actions with their PS4 names, the default keys ("A|B": two bindings) and the
@@ -175,8 +188,19 @@ PAD_BUTTONS = [('a', ('A / X', 'A / Cross')), ('b', ('B / Círculo', 'B / Circle
                ('misc1', ('Share / Mic (misc)', 'Share / Mic (misc)')), ('paddle1', ('Paddle 1', 'Paddle 1')),
                ('paddle2', ('Paddle 2', 'Paddle 2')), ('paddle3', ('Paddle 3', 'Paddle 3')),
                ('paddle4', ('Paddle 4', 'Paddle 4')), ('none', ('Nenhum', 'Not assigned'))]
-CONTROL_DEFAULTS = {'mouse_look': False, 'mouse_sensitivity': 1.0, 'mouse_aim_sensitivity': 1.0, 'mouse_invert_y': False,
-                    'pad_invert_y': False, 'keys': {}, 'pad': {}}
+CONTROL_DEFAULTS = {'mouse_look': True, 'mouse_sensitivity': 1.0, 'mouse_aim_sensitivity': 1.0, 'mouse_invert_y': False,
+                    'pad_invert_y': False, 'key_icons': False, 'keys': {}, 'pad': {}}
+# Keyboard icons (Controls window): the game files redrawn with the player's keys, by game, as paths in
+# the game folder, and the fonts tried for the key names (Windows first). data.psarc holds the font the
+# texts draw buttons with (scripts/key_icons.py), the pak the HUD's button pictures (scripts/hud_icons.py).
+# Both need Pillow.
+ICON_FILES = {'uc1': ('u1data/data.psarc', 'u1data/build/main/pak19/ps4/particle.pak'),
+              'uc2': ('u2data/data.psarc', 'u2data/build/main/pak22/ps4/hud.pak'),
+              'uc3': ('u3data/data.psarc', 'u3data/build/main/pak23/ps4/hud.pak')}
+ICON_FONTS = [Path(os.environ.get('WINDIR', r'C:\Windows')) / 'Fonts' / name
+              for name in ('arialbd.ttf', 'arial.ttf', 'segoeuib.ttf')] + \
+             [Path('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf')]
+KEY_ICONS_VERSION = 2  # raise when key_icons.py draws differently, so old copies are made again
 # Tk key names -> SDL key names (letters and digits map to themselves, upper case).
 TK_KEYS = {'space': 'Space', 'Return': 'Return', 'Escape': 'Escape', 'Tab': 'Tab', 'BackSpace': 'Backspace',
            'Shift_L': 'Left Shift', 'Shift_R': 'Right Shift', 'Control_L': 'Left Ctrl',
@@ -391,11 +415,66 @@ def adopt_menu_controls(settings):
     return changed
 
 
+def launcher_option(name):
+    """True for a GOW3_/UC_ name this launcher sets or turns off (UC_X is the same option as GOW3_X)."""
+    if name.startswith('UC_'):
+        name = 'GOW3_' + name[3:]
+    elif not name.startswith('GOW3_'):
+        return False
+    managed = set(COMMON) | set(EXPERIMENTAL) | set(TOGGLE_HELP)
+    for game in GAMES:
+        managed |= set(game[4])
+    for values in UC3_RESOLUTION_ENV.values():
+        managed |= set(values)
+    managed |= {'GOW3_GAME_DIR', 'GOW3_PATCH_DIR', 'GOW3_EXECUTABLE', 'GOW3_DATA_DIR', 'GOW3_USER_DIR',
+                'GOW3_INPUT_CONFIG', 'GOW3_UC3_RT_MB', 'GOW3_ICON_ROOT', 'GOW3_ICON_FILES', 'GOW3_ICON_ERROR'}
+    return name in managed
+
+
+def key_icon_files(settings, key):
+    """The game files redrawn with the player's keys (Controls > keyboard icons), kept in user\\icones\\
+    under their path in the game folder and made again only when the keys change. Returns the files made
+    (paths in the game folder) and the errors; a file that cannot be made stays the game's own."""
+    controls = settings.get('controls') or {}
+    if not controls.get('key_icons') or key not in ICON_FILES:
+        return [], []
+    font = next((f for f in ICON_FONTS if f.is_file()), None)
+    if not font:
+        return [], ['no font for the key names']
+    keys = {**DEFAULT_KEYS, **(controls.get('keys') or {})}
+    made, errors = [], []
+    for name in ICON_FILES[key]:
+        sources = [Path(d) / name for d in (settings.get('update_dir'), settings.get('game_dir')) if d]
+        source = next((p for p in sources if p.is_file()), None)
+        if not source:
+            errors.append(f'no {name}')
+            continue
+        stamp = hashlib.sha256(json.dumps([KEY_ICONS_VERSION, str(source), source.stat().st_size, str(font), LANG,
+                                           keys], sort_keys=True).encode()).hexdigest()
+        target = USER_DIR / 'icones' / name
+        mark = target.with_name(target.name + '.txt')
+        try:
+            if not (target.is_file() and mark.is_file() and mark.read_text(encoding='utf-8') == stamp):
+                if name.endswith('.psarc'):
+                    from key_icons import make_icon_psarc as make  # Pillow
+                else:
+                    from hud_icons import make_hud_pak as make
+                target.parent.mkdir(parents=True, exist_ok=True)
+                partial = target.with_name(target.name + '.part')
+                make(source, partial, keys, str(font), english=LANG != 'pt')
+                os.replace(partial, target)
+                mark.write_text(stamp, encoding='utf-8')
+            made.append(name)
+        except Exception as error:  # Pillow missing, unexpected file: that one keeps the controller icons
+            errors.append(f'{name}: {type(error).__name__}: {error}')
+    return made, errors
+
+
 def game_environment(settings, key):
     _k, _title, executable, _status, extra = next(g for g in GAMES if g[0] == key)
     env = dict(os.environ)
-    for name in [n for n in env if n.startswith(('GOW3_', 'UC_'))]:
-        del env[name]  # only what this launcher decides
+    for name in [n for n in env if launcher_option(n)]:
+        del env[name]  # only what this launcher decides; other GOW3_/UC_ names (test .bat diagnostics) pass through
     env.update(COMMON)
     env.update(extra)
     for name in settings.get('disabled', []):
@@ -414,13 +493,20 @@ def game_environment(settings, key):
     env['GOW3_EXECUTABLE'] = executable
     env['GOW3_DATA_DIR'] = str(DATA_DIR)
     env['GOW3_USER_DIR'] = str(USER_DIR)
-    if settings.get('controls'):  # saved in the Controls window; otherwise the game's own controls
-        try:
-            adopt_menu_controls(settings)
-            env['GOW3_INPUT_CONFIG'] = str(write_input_ini(settings['controls']))
-            save_settings(settings)
-        except OSError:
-            pass
+    if not settings.get('controls'):  # never saved: the Controls window's defaults (mouse look on)
+        settings['controls'] = {k: (dict(v) if isinstance(v, dict) else v) for k, v in CONTROL_DEFAULTS.items()}
+    try:
+        adopt_menu_controls(settings)
+        env['GOW3_INPUT_CONFIG'] = str(write_input_ini(settings['controls']))
+        save_settings(settings)
+    except OSError:
+        pass
+    made, errors = key_icon_files(settings, key)
+    if made:
+        env['GOW3_ICON_ROOT'] = str(USER_DIR / 'icones')
+        env['GOW3_ICON_FILES'] = ';'.join(made)
+    if errors:
+        env['GOW3_ICON_ERROR'] = '; '.join(errors)  # printed by the game in the log
     return env
 
 
@@ -528,9 +614,9 @@ def make_shortcut(key, title):
 
 
 def version_tuple(text):
-    """'v0.3.1' / '0.3.1' -> (0, 3, 1); None when it is not a version."""
+    """'v0.3.1' / '0.3.1' / '0.3.5-beta' -> (0, 3, 1) / (0, 3, 5); None when it is not a version."""
     try:
-        return tuple(int(n) for n in text.strip().lstrip('vV').split('.'))
+        return tuple(int(n) for n in text.strip().lstrip('vV').split('-')[0].split('.'))
     except (AttributeError, ValueError):
         return None
 
@@ -893,8 +979,8 @@ class Launcher:
 
     def controls(self):
         """Controls window: mouse look, keyboard and mouse keys, controller buttons (launcher.json
-        'controls', written to input.ini when a game starts). Until it is saved the game keeps its own
-        controls. Ported from SuperMedo's launcher (uncharted_pc, GPL)."""
+        'controls', written to input.ini when a game starts; until it is saved a game starts with
+        CONTROL_DEFAULTS, mouse look on). Ported from SuperMedo's launcher (uncharted_pc, GPL)."""
         tk, ttk = self.tk, self.ttk
         win = tk.Toplevel(self.root, bg=BG)
         win.title(_('Controles', 'Controls'))
@@ -961,6 +1047,16 @@ class Launcher:
         invert = tk.BooleanVar(value=bool(self.ctl['mouse_invert_y']))
         put(tk.Checkbutton(body, text=_('Inverter o mouse na vertical', 'Invert the mouse vertically'),
                            variable=invert, **check))
+        key_icons = tk.BooleanVar(value=bool(self.ctl.get('key_icons')))
+        put(tk.Checkbutton(body, text=_('Ícones de teclado no jogo', 'Keyboard icons in the game'),
+                           variable=key_icons, **check), 6)
+        put(self.label(body, _('Textos e avisos na tela (como "Pressione △" e o △ sobre objetos) mostram as suas teclas '
+                               'no lugar dos botões do controle. Vale para a sessão inteira; desligue se for jogar '
+                               'com controle.',
+                               'Texts and on-screen prompts (such as "Press △" and the △ over objects) show your keys '
+                               'instead of the controller buttons. It applies to the whole session; turn it off to '
+                               'play with a controller.'),
+                       9, MUTED, wraplength=560, justify='left'))
 
         put(self.label(body, _('Teclado e botões do mouse', 'Keyboard and mouse buttons'), 11, TEXT, True), 16)
         put(self.label(body, _('Clique numa caixa e aperte uma tecla ou um botão do mouse (a rodinha também vale). '
@@ -1022,7 +1118,7 @@ class Launcher:
         def save():
             self.ctl.update(mouse_look=look.get(), mouse_sensitivity=round(sensitivity.get(), 2),
                             mouse_aim_sensitivity=round(aim_sensitivity.get(), 2),
-                            mouse_invert_y=invert.get(), pad_invert_y=pad_invert.get())
+                            mouse_invert_y=invert.get(), pad_invert_y=pad_invert.get(), key_icons=key_icons.get())
             self.ctl['keys'] = {a: v for a, v in self.ctl['keys'].items() if v != DEFAULT_KEYS[a]}
             self.ctl['pad'] = {a: values[b.current()] for a, b in pad_boxes.items()
                                if values[b.current()] != DEFAULT_PAD[a]}

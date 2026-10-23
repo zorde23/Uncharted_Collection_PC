@@ -453,6 +453,28 @@ static volatile int follow_direct=1;
 static float follow_kept=1.0f;            /* average fraction of a turn still there the next frame */
 static float follow_before, follow_after; /* heading before and after the last turn */
 static int follow_pending;
+/* GOW3_MOUSE_U1_REWRITE_LOG=1 (diagnostic, off; Opus's study of the UC1 drops to the stick): at the
+ * end of the U1 follow camera update (0xaf7c2) the game can set the direction again from where the
+ * camera really is (normalized target - position), and marks it in the byte +0x1410 (0 on the
+ * other paths). The callback runs at the start of the next update, so the byte says whether the
+ * frame that lost our turn rewrote the direction. Counts lost turns (kept < 0.05) with the byte at
+ * 1 and at 0, printed at each switch to and from the stick. -1: not U1, or off. */
+static int follow_rewrite=-1;
+static unsigned follow_lost_rewrite, follow_lost_other, follow_kept_rewrite, follow_kept_other;
+/* Opus's second hypothesis: the update at 0xaede0 serves several cameras, and the measure keeps no
+ * track of which one it turned. A ring of the last 16 measured turns (camera object, raw kept,
+ * +0x1410, callbacks in that frame, camera changed since the turn before), printed at each drop
+ * to the stick; and a line when the camera object changes (at most one a second). */
+struct u1_turn { uint64_t us, camera; float kept; int rewrite, calls, changed; };
+static struct u1_turn u1_turns[16];
+static unsigned u1_turn_count;
+static uint64_t u1_camera, u1_turned_camera, u1_last_call_us, u1_changed_log_us;
+static int u1_calls; /* callbacks less than 8 ms apart: the same frame */
+static int u1_rewrite_log(void) {
+    static int on=-1;
+    if (on<0) { const char *v=getenv("GOW3_MOUSE_U1_REWRITE_LOG"); on=v && v[0]=='1'; if (on) printf("Mouse: logging the U1 follow camera's direction rewrites (+0x1410) at each drop to the stick\n"); }
+    return on;
+}
 static volatile int aim_held;             /* L2 is held: the aiming camera (also while it blends in) */
 /* The mouse sensitivity now: times mouse_aim_sensitivity while aiming. */
 static float mouse_sensitivity(void) { return mouse_cfg.sensitivity*(aim_held ? mouse_cfg.aim_sensitivity : 1.0f); }
@@ -528,7 +550,27 @@ static void follow_camera(uint64_t camera, uint32_t dir_offset, uint32_t arc_off
         kept=kept<0.0f ? 0.0f : kept>1.0f ? 1.0f : kept;
         follow_kept+=0.2f*(kept-follow_kept);
         const int direct=follow_kept<0.12f ? 0 : follow_kept>0.3f ? 1 : follow_direct;
+        if (follow_rewrite>=0) {
+            struct u1_turn *t=&u1_turns[u1_turn_count++%16];
+            t->us=now; t->camera=camera; t->kept=kept; t->rewrite=follow_rewrite; t->calls=u1_calls;
+            t->changed=u1_turned_camera && u1_turned_camera!=camera;
+            if (kept<0.05f) { if (follow_rewrite) ++follow_lost_rewrite; else ++follow_lost_other; }
+            else { if (follow_rewrite) ++follow_kept_rewrite; else ++follow_kept_other; }
+        }
         if (direct!=follow_direct) printf("Mouse: follow camera %s (kept %.2f)\n",direct ? "turns with the mouse" : "keeps no turns, the mouse turns it with the stick",follow_kept);
+        if (direct!=follow_direct && follow_rewrite>=0 && !direct) {
+            const unsigned n=u1_turn_count<16 ? u1_turn_count : 16;
+            for (unsigned i=u1_turn_count-n; i<u1_turn_count; ++i) {
+                const struct u1_turn *t=&u1_turns[i%16];
+                printf("Mouse: U1 turn t=%.4f camera %#llx kept %.2f rewrite %d calls/frame %d%s\n",t->us*1e-6,
+                       (unsigned long long)t->camera,t->kept,t->rewrite,t->calls,t->changed ? " CAMERA CHANGED" : "");
+            }
+        }
+        if (direct!=follow_direct && follow_rewrite>=0) {
+            printf("Mouse: U1 rewrites (+0x1410) since the last switch: turns lost %u with a rewrite, %u without; turns kept %u with, %u without\n",
+                   follow_lost_rewrite,follow_lost_other,follow_kept_rewrite,follow_kept_other);
+            follow_lost_rewrite=follow_lost_other=follow_kept_rewrite=follow_kept_other=0;
+        }
         follow_direct=direct;
         follow_pending=0;
     }
@@ -563,9 +605,10 @@ static void follow_camera(uint64_t camera, uint32_t dir_offset, uint32_t arc_off
             follow_before=heading;
             follow_after=heading_of(dir);
             follow_pending=1;
+            u1_turned_camera=camera;
         }
-        if (mouse_debug()) printf("Mouse: follow t=%.4f dx=%.1f heading=%.2f target=%.2f kept=%.2f stick\n",
-                                  now*1e-6,dx,heading,follow_target,follow_kept);
+        if (mouse_debug()) printf("Mouse: follow t=%.4f dx=%.1f heading=%.2f target=%.2f kept=%.2f rewrite=%d stick\n",
+                                  now*1e-6,dx,heading,follow_target,follow_kept,follow_rewrite);
         return;
     }
     follow_correction=0.0f;
@@ -589,6 +632,7 @@ static void follow_camera(uint64_t camera, uint32_t dir_offset, uint32_t arc_off
             follow_before=heading;
             follow_after=heading_of(dir);
             follow_pending=1;
+            u1_turned_camera=camera;
         }
     }
     if (dy!=0.0f && arc) {
@@ -598,6 +642,20 @@ static void follow_camera(uint64_t camera, uint32_t dir_offset, uint32_t arc_off
 }
 static void __attribute__((ms_abi)) u1_follow_camera(uint64_t camera, uint64_t unused, uint64_t image, uint64_t r14) {
     (void)unused; (void)image; (void)r14;
+    follow_rewrite=camera && u1_rewrite_log() ? *(volatile uint8_t *)(uintptr_t)(camera+0x1410) : -1;
+    if (follow_rewrite>=0) {
+        const uint64_t now=now_us();
+        u1_calls=u1_last_call_us && now-u1_last_call_us<8000 ? u1_calls+1 : 1;
+        u1_last_call_us=now;
+        if (camera!=u1_camera) {
+            if (u1_camera && now-u1_changed_log_us>=1000000) {
+                printf("Mouse: U1 follow camera object changed %#llx -> %#llx (%d calls/frame)\n",
+                       (unsigned long long)u1_camera,(unsigned long long)camera,u1_calls);
+                u1_changed_log_us=now;
+            }
+            u1_camera=camera;
+        }
+    }
     follow_camera(camera,0x1310,0x12bc,61.0f);
 }
 static void __attribute__((ms_abi)) u2_follow_camera(uint64_t camera, uint64_t unused, uint64_t image, uint64_t r14) {
@@ -790,7 +848,8 @@ static float aim_camera(uint64_t camera, size_t dir_at, size_t copy_at, size_t c
         kept=kept<0.0f ? 0.0f : kept>1.0f ? 1.0f : kept;
         aim_kept+=0.2f*(kept-aim_kept);
         const int direct=aim_kept<0.12f ? 0 : aim_kept>0.3f ? 1 : aim_direct;
-        if (direct!=aim_direct) printf("Mouse: aim camera %s (kept %.2f)\n",direct ? "turns with the mouse" : "keeps no turns, mouse aims with the stick",aim_kept);
+        if (direct!=aim_direct) printf("Mouse: aim camera %s (kept %.2f, %.0f ms after aiming started)\n",direct ? "turns with the mouse" : "keeps no turns, mouse aims with the stick",
+                                       aim_kept,(double)(aim_hook_us-aim_start_us)/1000.0);
         aim_direct=direct;
         aim_pending=0;
     }
@@ -872,11 +931,24 @@ static void __attribute__((ms_abi)) u3_aim_camera_100(uint64_t camera, uint64_t 
     if (discover_on()) discover_call(19,camera,0);
     aim_camera(camera,0x200,0x11e0,0,NULL,0,0);
 }
+/* GOW3_MOUSE_AIM_U1_SETTLE_MS=N (test; default 600, 0-2000): how long after aiming starts U1's mouse
+ * goes to the stick while the zoom in may still put its own direction back. */
+static uint64_t u1_aim_settle_us(void) {
+    static long ms=-1;
+    if (ms<0) {
+        const char *v=getenv("GOW3_MOUSE_AIM_U1_SETTLE_MS");
+        char *end=NULL;
+        ms=v && v[0] ? strtol(v,&end,10) : 600;
+        if (v && v[0] && (*end || ms<0 || ms>2000)) ms=600;
+        if (ms!=600) printf("Mouse: U1 aim settles for %ld ms (GOW3_MOUSE_AIM_U1_SETTLE_MS)\n",ms);
+    }
+    return (uint64_t)ms*1000;
+}
 static void __attribute__((ms_abi)) u1_aim_camera(uint64_t buffer, uint64_t camera, uint64_t image, uint64_t r14) {
     (void)image; (void)r14;
     if (discover_on()) discover_call(6,buffer,camera);
     static const size_t u1_more[]={0x1690,0x1830};
-    aim_camera(camera,0x1680,0x16b0,0,u1_more,aim_u1_all() ? 2 : 0,aim_u1_all() ? 600000 : 0);
+    aim_camera(camera,0x1680,0x16b0,0,u1_more,aim_u1_all() ? 2 : 0,aim_u1_all() ? u1_aim_settle_us() : 0);
 }
 static void __attribute__((ms_abi)) u2_aim_camera(uint64_t camera, uint64_t rsi, uint64_t image, uint64_t r14) {
     (void)image; (void)r14;

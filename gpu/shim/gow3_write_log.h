@@ -18,7 +18,10 @@ void NoteIntent(std::uint64_t address, const void* data, std::uint64_t size, Sou
 /// memory at `address`; reports any fence or WriteData the GPU emulation wrote there recently
 /// (precise readbacks: labels go through the backing view, unseen by the page tracker, so a
 /// readback of their range brings the GPU's copy back over them).
+/// uc3: with GOW3_FAULT_WRITES=1 every download and backing write is also kept in a small ring
+/// that the fault handler prints for the pages the registers point at.
 void NoteDownload(std::uint64_t address, const void* data, std::uint64_t size);
+bool FaultWrites();
 }
 
 extern "C" void gow3gpu_dump_guest_writes(void* ucontext);

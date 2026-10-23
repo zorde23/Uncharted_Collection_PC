@@ -32,6 +32,13 @@ std::atomic<std::uint64_t> head{0};
 std::array<Entry, 256> hits;
 std::atomic<std::uint64_t> hits_head{0};
 constexpr std::uint64_t Pattern = 0x0000005300000000ull;
+// uc3: GOW3_FAULT_WRITES=1, the last writes the GPU emulation made to guest memory past the page
+// tracker (readbacks, leaf downloads, backing writes), kept apart and cheap enough for normal
+// play, so a crash on corrupted guest data says which of them landed on it last.
+constexpr std::size_t FaultSize = 1 << 16;
+std::array<Entry, FaultSize> fault_ring;
+std::atomic<std::uint64_t> fault_head{0};
+constexpr std::uint32_t DownloadSource = 100;
 
 void Push(std::array<Entry, Size>& r, std::atomic<std::uint64_t>& h, const Entry& e) {
     r[h.fetch_add(1, std::memory_order_relaxed) % r.size()] = e;
@@ -52,6 +59,21 @@ bool Enabled() {
     return Mode() == 1;
 }
 
+bool FaultWrites() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("GOW3_FAULT_WRITES");
+        return env && env[0] == '1';
+    }();
+    return enabled;
+}
+
+void NoteFault(std::uint64_t address, const void* data, std::uint64_t size, std::uint32_t source) {
+    static thread_local const std::uint32_t tid = static_cast<std::uint32_t>(gettid());
+    Entry e{address, size, 0, __rdtsc(), source, tid};
+    std::memcpy(&e.first, data, size < 8 ? size : 8);
+    fault_ring[fault_head.fetch_add(1, std::memory_order_relaxed) % FaultSize] = e;
+}
+
 void NoteIntent(std::uint64_t address, const void* data, std::uint64_t size, Source source) {
     if (Mode() == 2) {
         Record(address, data, size, source);
@@ -59,12 +81,18 @@ void NoteIntent(std::uint64_t address, const void* data, std::uint64_t size, Sou
 }
 
 void Note(std::uint64_t address, const void* data, std::uint64_t size, Source source) {
+    if (source == Backing && FaultWrites()) {
+        NoteFault(address, data, size, Backing);
+    }
     if (Enabled()) {
         Record(address, data, size, source);
     }
 }
 
 void NoteDownload(std::uint64_t address, const void* data, std::uint64_t size) {
+    if (FaultWrites()) {
+        NoteFault(address, data, size, DownloadSource);
+    }
     if (!Enabled()) {
         return;
     }
@@ -119,15 +147,61 @@ void Record(std::uint64_t address, const void* data, std::uint64_t size, Source 
 }
 } // namespace Gow3WriteLog
 
+namespace Gow3WriteLog {
+namespace {
+// uc3, GOW3_FAULT_WRITES=1: for each pointer register, the 0x40 bytes it points at (through the
+// backing view) and the last logged writes into its 4 KiB page, newest first.
+void DumpFaultWrites(const std::uint64_t* regs, const char* const* names, int count) {
+    const std::uint64_t n = fault_head.load();
+    const std::uint64_t now = __rdtsc();
+    std::fprintf(stderr, "Fault writes: %llu writes logged (GOW3_FAULT_WRITES)\n", (unsigned long long)n);
+    for (int r = 0; r < count; ++r) {
+        const std::uint64_t at = regs[r];
+        std::uintptr_t start = 0, end = 0;
+        int mapped = 0;
+        const unsigned char* backing = nullptr;
+        if (at < 0x10000 || !runtime_memory_region_backing(at, &start, &end, &mapped, &backing) ||
+            !backing || at < start || at + 0x40 > end) {
+            continue;
+        }
+        std::fprintf(stderr, "Fault writes: %s=%#llx:", names[r], (unsigned long long)at);
+        for (int q = 0; q < 8; ++q) {
+            std::uint64_t v;
+            std::memcpy(&v, backing + q * 8, 8);
+            std::fprintf(stderr, " %016llx", (unsigned long long)v);
+        }
+        std::fprintf(stderr, "\n");
+        const std::uint64_t page = at & ~0xfffull;
+        int shown = 0;
+        for (std::uint64_t i = n; i-- > (n > FaultSize ? n - FaultSize : 0) && shown < 16;) {
+            const Entry& e = fault_ring[i % FaultSize];
+            if (e.address >= page + 0x1000 || e.address + e.size <= page) {
+                continue;
+            }
+            const bool hits = e.address < at + 0x40 && e.address + e.size > at;
+            std::fprintf(stderr,
+                         "Fault writes:   %s %#llx +%llu first %#llx tid %u, %.3f s before the fault%s\n",
+                         e.source == DownloadSource ? "readback" : "backing write",
+                         (unsigned long long)e.address, (unsigned long long)e.size,
+                         (unsigned long long)e.first, e.tid, double(now - e.tsc) / 3.0e9,
+                         hits ? " (COVERS IT)" : "");
+            ++shown;
+        }
+    }
+}
+} // namespace
+} // namespace Gow3WriteLog
+
 extern "C" void gow3gpu_dump_guest_writes(void* ucontext) {
     using namespace Gow3WriteLog;
-    if (Mode() == 0) {
+    if (Mode() == 0 && !FaultWrites()) {
         return;
     }
 #ifdef _WIN32
     // The loader passes EXCEPTION_POINTERS (see signal_context.cpp).
     const CONTEXT* c = static_cast<const EXCEPTION_POINTERS*>(ucontext)->ContextRecord;
     const std::uint64_t regs[] = {c->Rax, c->Rbx, c->Rcx, c->Rdx, c->Rsi, c->Rdi, c->R14, c->R15};
+    const std::uint64_t more[] = {c->Rdi, c->Rbx, c->Rax, c->R12, c->R13, c->R14, c->R15, c->Rsi};
 #else
     const auto* uc = static_cast<const ucontext_t*>(ucontext);
     const auto* g = uc->uc_mcontext.gregs;
@@ -135,7 +209,18 @@ extern "C" void gow3gpu_dump_guest_writes(void* ucontext) {
                                   std::uint64_t(g[REG_RCX]), std::uint64_t(g[REG_RDX]),
                                   std::uint64_t(g[REG_RSI]), std::uint64_t(g[REG_RDI]),
                                   std::uint64_t(g[REG_R14]), std::uint64_t(g[REG_R15])};
+    const std::uint64_t more[] = {std::uint64_t(g[REG_RDI]), std::uint64_t(g[REG_RBX]),
+                                  std::uint64_t(g[REG_RAX]), std::uint64_t(g[REG_R12]),
+                                  std::uint64_t(g[REG_R13]), std::uint64_t(g[REG_R14]),
+                                  std::uint64_t(g[REG_R15]), std::uint64_t(g[REG_RSI])};
 #endif
+    if (FaultWrites()) {
+        const char* const more_names[] = {"rdi", "rbx", "rax", "r12", "r13", "r14", "r15", "rsi"};
+        DumpFaultWrites(more, more_names, 8);
+    }
+    if (Mode() == 0) {
+        return;
+    }
     const char* names[] = {"rax", "rbx", "rcx", "rdx", "rsi", "rdi", "r14", "r15"};
     for (int i = 0; i < 8; ++i) {
         std::fprintf(stderr, "Write log: %s=%#llx\n", names[i], (unsigned long long)regs[i]);

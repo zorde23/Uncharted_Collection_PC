@@ -56,28 +56,11 @@ Id EmitFPMin64(EmitContext& ctx, Id a, Id b) {
     return ctx.OpFMin(ctx.F64[1], a, b);
 }
 
-// ucndc (GOW3_SM_NAN=1, diagnosis; clear the shader cache): NaN handling as in SuperMedo's port
-// (FClamp for saturate, FMin/FMax for min3/max3, no NaN case in med3). There an undefined NaN
-// clamp happened to give 1 where the GCN rule gives 0.
-static bool SmNan() {
-    static const bool enabled = [] {
-        const char* env = std::getenv("GOW3_SM_NAN");
-        return env && env[0] == '1';
-    }();
-    return enabled;
-}
-
 Id EmitFPMinTri32(EmitContext& ctx, Id a, Id b, Id c) {
-    if (SmNan()) {
-        return ctx.OpFMin(ctx.F32[1], a, ctx.OpFMin(ctx.F32[1], b, c));
-    }
     return ctx.OpNMin(ctx.F32[1], a, ctx.OpNMin(ctx.F32[1], b, c));
 }
 
 Id EmitFPMaxTri32(EmitContext& ctx, Id a, Id b, Id c) {
-    if (SmNan()) {
-        return ctx.OpFMax(ctx.F32[1], a, ctx.OpFMax(ctx.F32[1], b, c));
-    }
     return ctx.OpNMax(ctx.F32[1], a, ctx.OpNMax(ctx.F32[1], b, c));
 }
 
@@ -87,9 +70,6 @@ Id EmitFPMedTri32(EmitContext& ctx, Id a, Id b, Id c) {
         ctx.OpLogicalOr(ctx.U1[1], ctx.OpIsNan(ctx.U1[1], b), ctx.OpIsNan(ctx.U1[1], c)))};
     const Id mmx{ctx.OpFMin(ctx.F32[1], ctx.OpFMax(ctx.F32[1], a, b), c)};
     const Id med3{ctx.OpFMax(ctx.F32[1], ctx.OpFMin(ctx.F32[1], a, b), mmx)};
-    if (SmNan()) {
-        return med3;
-    }
     const Id min3{ctx.OpNMin(ctx.F32[1], a, ctx.OpNMin(ctx.F32[1], b, c))};
     return ctx.OpSelect(ctx.F32[1], is_nan, min3, med3);
 }
@@ -163,18 +143,12 @@ Id EmitFPSqrt(EmitContext& ctx, Id value) {
 }
 
 Id EmitFPSaturate32(EmitContext& ctx, Id value) {
-    if (SmNan()) {
-        return ctx.OpFClamp(ctx.F32[1], value, ctx.f32_zero_value, ctx.f32_one_value);
-    }
     return ctx.OpNClamp(ctx.F32[1], value, ctx.f32_zero_value, ctx.f32_one_value);
 }
 
 Id EmitFPSaturate64(EmitContext& ctx, Id value) {
     const Id zero{ctx.Constant(ctx.F64[1], f64{0.0})};
     const Id one{ctx.Constant(ctx.F64[1], f64{1.0})};
-    if (SmNan()) {
-        return ctx.OpFClamp(ctx.F64[1], value, zero, one);
-    }
     return ctx.OpNClamp(ctx.F64[1], value, zero, one);
 }
 

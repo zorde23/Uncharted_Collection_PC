@@ -114,6 +114,267 @@ static void describe_address(char *out, size_t size, uintptr_t address) {
     }
     snprintf(out,size,"%p",(void *)address);
 }
+/* uc3 GOW3_CB_WATCH=1 (diagnostic, off; Opus's design for the Uncharted 1.02 crash in the
+ * command buffer writer 0x63e260: a job's command buffer object comes back with its out-of-space
+ * callback (+0x18) zeroed and its user data (+0x20) pointing at a stack local, and the next full
+ * buffer calls address 0). The objects live in frame-allocator memory that is reused within a
+ * frame, so a watch on fixed addresses only sees that reuse; this one follows the objects.
+ * Two int3s, kept for the whole session:
+ * - birth, 0x6422b4 (`movq $0,0x30(%rbx)`, the handler does it), right after the init stores
+ *   the callback and user data: the initializing thread watches the new object;
+ * - use, 0x501e9d (`lea rdi,[rbx+0x2d0]`, the handler does it), where a job hands the object to
+ *   the writer: the using thread watches it.
+ * Each thread's DR0/DR1 watch +0x18/+0x20 of its current object, DR2/DR3 of its previous one.
+ * Every watched write goes silently into that thread's ring (instruction, value, tsc, the
+ * guest's frame and the end-of-pipe flips reached), with a short guest backtrace when +0x18
+ * becomes 0; births and uses go into a second ring. Nothing is printed while playing except a
+ * line a minute; the rings are printed at a fatal fault. */
+enum { CBW_THREADS = 64, CBW_HITS = 64, CBW_OBJECTS = 16, CBW_BT = 4, CBW_RIPS = 64 };
+struct cbw_hit {
+    uint64_t tsc, rip, at, field, value, frame, eop, bt[CBW_BT];
+};
+struct cbw_object {
+    uint64_t tsc, outer, cb, ud, frame, eop;
+    uint32_t birth; /* 1 at the init, 0 at a use */
+};
+struct cbw_thread {
+    unsigned long id;
+    uint64_t hit_count, object_count;
+    struct cbw_hit hits[CBW_HITS];
+    struct cbw_object objects[CBW_OBJECTS];
+};
+static unsigned char *cbw_site, *cbw_birth_site;
+static struct cbw_thread cbw_pool[CBW_THREADS];
+static volatile LONG cbw_pool_count;
+static __thread struct cbw_thread *cbw_me;
+static volatile LONG64 cbw_passes, cbw_births, cbw_hits_total, cbw_zero_hits;
+static uint64_t cbw_rip_keys[CBW_RIPS], cbw_rip_values[CBW_RIPS];
+static volatile LONG cbw_rip_counts[CBW_RIPS];
+static struct cbw_thread *cbw_self(void) {
+    if (!cbw_me) {
+        const LONG k = InterlockedIncrement(&cbw_pool_count) - 1;
+        if (k >= CBW_THREADS) return NULL;
+        cbw_pool[k].id = GetCurrentThreadId();
+        cbw_me = &cbw_pool[k];
+    }
+    return cbw_me;
+}
+static void cbw_stamp(uint64_t *frame, uint64_t *eop) {
+    *frame = *eop = 0;
+    if (gpu_enabled) gow3gpu_frame_counters(frame, eop);
+}
+static void cbw_dump_object(const char *what, uint64_t outer) {
+    uint64_t q[16];
+    SIZE_T got = 0;
+    if (!ReadProcessMemory(GetCurrentProcess(), (LPCVOID)(uintptr_t)outer, q, sizeof(q), &got) || got != sizeof(q)) {
+        fprintf(stderr, "CB watch: %s %#" PRIx64 ": unreadable\n", what, outer);
+        return;
+    }
+    fprintf(stderr, "CB watch: %s %#" PRIx64 ":", what, outer);
+    for (int i = 0; i < 16; ++i) fprintf(stderr, "%s%016" PRIx64, i == 8 ? "\n  +0x40:" : " ", q[i]);
+    fprintf(stderr, "\n");
+}
+static void cbw_note_object(uint64_t outer, uint32_t birth) {
+    struct cbw_thread *t = cbw_self();
+    if (!t) return;
+    if (!birth && t->object_count) {
+        const struct cbw_object *last = &t->objects[(t->object_count - 1) % CBW_OBJECTS];
+        if (last->outer == outer && !last->birth) return; /* the same object again */
+    }
+    struct cbw_object *o = &t->objects[t->object_count % CBW_OBJECTS];
+    o->tsc = __rdtsc();
+    o->outer = outer;
+    o->cb = *(volatile uint64_t *)(uintptr_t)(outer + 0x18);
+    o->ud = *(volatile uint64_t *)(uintptr_t)(outer + 0x20);
+    o->birth = birth;
+    cbw_stamp(&o->frame, &o->eop);
+    ++t->object_count;
+}
+/* DR0/DR1 follow the current object, DR2/DR3 keep the one before it (set in the exception's
+ * context: they apply when the thread resumes). */
+static void cbw_arm_self(CONTEXT *c, uint64_t outer) {
+    const DWORD64 on01 = 0x5, on23 = 0x50; /* local enables */
+    if ((c->Dr7 & on01) == on01 && c->Dr0 == outer + 0x18) return;
+    const DWORD64 previous = (c->Dr7 & on01) == on01 ? c->Dr0 : 0;
+    if (previous) {
+        c->Dr2 = previous;
+        c->Dr3 = previous + 8;
+        c->Dr7 = (c->Dr7 & ~((DWORD64)0xff << 24)) | on23 | ((DWORD64)0x99 << 24); /* write, 8 bytes */
+    }
+    c->Dr0 = outer + 0x18;
+    c->Dr1 = outer + 0x20;
+    c->Dr7 = (c->Dr7 & ~((DWORD64)0xff << 16)) | on01 | ((DWORD64)0x99 << 16);
+    c->ContextFlags |= CONTEXT_DEBUG_REGISTERS;
+}
+/* A debug register fired: the write already happened, rip is the next instruction. */
+static void cbw_note_write(CONTEXT *c) {
+    struct cbw_thread *t = cbw_self();
+    const DWORD64 drs[4] = {c->Dr0, c->Dr1, c->Dr2, c->Dr3};
+    for (int d = 0; d < 4; ++d) {
+        if (!(c->Dr6 & (1u << d))) continue;
+        InterlockedIncrement64(&cbw_hits_total);
+        const uint64_t at = drs[d], value = *(volatile uint64_t *)(uintptr_t)at;
+        const uint64_t rip = c->Rip - (uint64_t)(uintptr_t)image;
+        int slot = -1;
+        for (int i = 0; i < CBW_RIPS && slot < 0; ++i) {
+            const LONG64 seen = InterlockedCompareExchange64((volatile LONG64 *)&cbw_rip_keys[i], (LONG64)rip, 0);
+            if (!seen || (uint64_t)seen == rip) slot = i;
+        }
+        if (slot >= 0) { InterlockedIncrement(&cbw_rip_counts[slot]); cbw_rip_values[slot] = value; }
+        if (!t) continue;
+        struct cbw_hit *h = &t->hits[t->hit_count % CBW_HITS];
+        h->tsc = __rdtsc();
+        h->rip = rip;
+        h->at = at;
+        h->field = (d & 1) ? 0x20 : 0x18;
+        h->value = value;
+        cbw_stamp(&h->frame, &h->eop);
+        memset(h->bt, 0, sizeof(h->bt));
+        if (!(d & 1) && !value) {
+            InterlockedIncrement64(&cbw_zero_hits);
+            uint64_t rbp = c->Rbp;
+            for (int depth = 0; depth < CBW_BT && rbp; ++depth) {
+                uintptr_t frame[2];
+                SIZE_T got = 0;
+                if (!ReadProcessMemory(GetCurrentProcess(), (void *)(uintptr_t)rbp, frame, sizeof(frame), &got) ||
+                    got != sizeof(frame) || frame[0] <= rbp) break;
+                h->bt[depth] = frame[1];
+                rbp = frame[0];
+            }
+        }
+        ++t->hit_count;
+    }
+    c->Dr6 = 0;
+}
+static DWORD WINAPI cbw_monitor(LPVOID unused) {
+    (void)unused;
+    for (;;) {
+        Sleep(60000);
+        fprintf(stderr, "CB watch: %lld uses, %lld inits, %lld watched writes (%lld callbacks zeroed), %ld threads\n",
+                (long long)cbw_passes, (long long)cbw_births, (long long)cbw_hits_total, (long long)cbw_zero_hits,
+                (long)cbw_pool_count);
+    }
+    return 0;
+}
+static void cbw_dump_thread(const struct cbw_thread *t, uint64_t now) {
+    char where[MAX_PATH + 64];
+    fprintf(stderr, "CB watch: thread %lu, %llu watched writes, %llu objects (newest last; age in tsc ticks before the fault)\n",
+            t->id, (unsigned long long)t->hit_count, (unsigned long long)t->object_count);
+    for (uint64_t n = t->object_count > CBW_OBJECTS ? t->object_count - CBW_OBJECTS : 0; n < t->object_count; ++n) {
+        const struct cbw_object *o = &t->objects[n % CBW_OBJECTS];
+        fprintf(stderr, "  %s %#" PRIx64 " cb %#" PRIx64 " ud %#" PRIx64 ", frame %llu, eop flips %llu, age %llu\n",
+                o->birth ? "init" : "use ", o->outer, o->cb, o->ud, (unsigned long long)o->frame,
+                (unsigned long long)o->eop, (unsigned long long)(now - o->tsc));
+    }
+    for (uint64_t n = t->hit_count > CBW_HITS ? t->hit_count - CBW_HITS : 0; n < t->hit_count; ++n) {
+        const struct cbw_hit *h = &t->hits[n % CBW_HITS];
+        fprintf(stderr, "  write %#" PRIx64 " to +0x%x of %#" PRIx64 ", before eboot+%#" PRIx64 ", frame %llu, eop flips %llu, age %llu%s\n",
+                h->value, (unsigned)h->field, h->at - h->field, h->rip, (unsigned long long)h->frame,
+                (unsigned long long)h->eop, (unsigned long long)(now - h->tsc),
+                h->field == 0x18 && !h->value ? "  <-- CALLBACK ZEROED" : "");
+        for (int depth = 0; depth < CBW_BT && h->bt[depth]; ++depth) {
+            describe_address(where, sizeof(where), (uintptr_t)h->bt[depth]);
+            fprintf(stderr, "    #%d %s\n", depth, where);
+        }
+    }
+}
+static void cbw_dump_all(void) {
+    if (!cbw_site) return;
+    const uint64_t now = __rdtsc();
+    uint64_t frame, eop;
+    cbw_stamp(&frame, &eop);
+    fprintf(stderr, "CB watch: %lld uses, %lld inits, %lld watched writes (%lld callbacks zeroed); now frame %llu, eop flips %llu\n",
+            (long long)cbw_passes, (long long)cbw_births, (long long)cbw_hits_total, (long long)cbw_zero_hits,
+            (unsigned long long)frame, (unsigned long long)eop);
+    for (int i = 0; i < CBW_RIPS && cbw_rip_keys[i]; ++i)
+        fprintf(stderr, "  before eboot+%#" PRIx64 ": %ld writes, last value %#" PRIx64 "\n", cbw_rip_keys[i],
+                (long)cbw_rip_counts[i], cbw_rip_values[i]);
+    /* The faulting thread first, with its current and previous objects as they are now. */
+    if (cbw_me) {
+        fprintf(stderr, "CB watch: the faulting thread:\n");
+        cbw_dump_thread(cbw_me, now);
+        if (cbw_me->object_count) cbw_dump_object("its last object", cbw_me->objects[(cbw_me->object_count - 1) % CBW_OBJECTS].outer);
+    }
+    const LONG count = cbw_pool_count < CBW_THREADS ? cbw_pool_count : CBW_THREADS;
+    for (LONG i = 0; i < count; ++i)
+        if (&cbw_pool[i] != cbw_me) cbw_dump_thread(&cbw_pool[i], now);
+}
+static void cbw_install(uint64_t image_size) {
+    static const unsigned char use[] = {0x48, 0x89, 0xfb, 0x48, 0x8d, 0xbb, 0xd0, 0x02, 0x00, 0x00, 0xe8};
+    static const unsigned char birth[] = {0x48, 0x89, 0x53, 0x18, 0x48, 0x89, 0x5b, 0x20,
+                                          0x48, 0xc7, 0x43, 0x30, 0x00, 0x00, 0x00, 0x00, 0xc7, 0x43, 0x3c};
+    if (image_size < 0x6422c7 || memcmp(image + 0x501e9a, use, sizeof(use)) || memcmp(image + 0x6422ac, birth, sizeof(birth))) {
+        printf("CB watch: the Uncharted 1.02 command buffer code at 0x501e9d/0x6422b4 is not in this executable, off\n");
+        return;
+    }
+    cbw_site = image + 0x501e9d;
+    cbw_birth_site = image + 0x6422b4;
+    *cbw_birth_site = 0xcc;
+    *cbw_site = 0xcc;
+    HANDLE h = CreateThread(NULL, 0, cbw_monitor, NULL, 0, NULL);
+    if (h) CloseHandle(h);
+    printf("CB watch: each thread watches its command buffer objects (init 0x6422b4, use 0x501e9d), printed at a crash (GOW3_CB_WATCH)\n");
+}
+/* uc3 GOW3_UC1_BIND_RETRY (Uncharted 1.02): the two crashes of a friend's NVIDIA PC (2026-10-22,
+ * execute at 0 in NdJobWorkerThread) are one loop of the command buffer writer (eboot+0x63e260):
+ * each entry of the shader's last binding group names its handler by a type (u16 at +0) in a table
+ * of member functions (eboot+0x94a350), and the entry it read had type 0, which has no handler
+ * (the list says 5 entries; the 5th started with zeros). Instead of the crash the thread waits a
+ * few ms for the entry to be written and runs it again; if it still has no handler it skips it
+ * (one binding missing for one draw). The list is printed, at the fault and after the wait. */
+static unsigned char *ubr_loop;
+static LONG ubr_count;
+static void ubr_install(uint64_t image_size) {
+    static const unsigned char loop[] = {0x44, 0x89, 0xe0, 0x48, 0x8d, 0x0c, 0x40, 0x48, 0xc1, 0xe1, 0x04, 0x49, 0x8d, 0x44,
+        0x0b, 0x28, 0x41, 0x0f, 0xb7, 0x54, 0x0b, 0x28, 0x48, 0xc1, 0xe2, 0x04, 0x48, 0x8b, 0x0c, 0x1a, 0x48, 0x8b, 0x7c,
+        0x1a, 0x08, 0x4c, 0x01, 0xef, 0x4d, 0x89, 0xde, 0xf6, 0xc1, 0x01, 0x74, 0x08, 0x48, 0x8b, 0x17, 0x48, 0x8b, 0x4c,
+        0x11, 0xff, 0x0f, 0xb6, 0x70, 0x02, 0x4c, 0x89, 0xfa, 0xff, 0xd1, 0x41, 0xff, 0xc4, 0x4d, 0x89, 0xf3};
+    if (image_size < 0x6400e0 + sizeof(loop) || memcmp(image + 0x6400e0, loop, sizeof(loop))) {
+        printf("UC1 binding retry: the Uncharted 1.02 binding loop at 0x6400e0 is not in this executable, off\n");
+        return;
+    }
+    ubr_loop = image + 0x6400e0;
+    printf("UC1 binding retry: a shader binding with no handler (0x64011d) waits for its entry, else is skipped (GOW3_UC1_BIND_RETRY)\n");
+}
+static void ubr_dump(const char *when, const unsigned char *list) {
+    fprintf(stderr, "UC1 binding retry: the list at %p %s:", (const void *)list, when);
+    for (int i = 0; i < 0x118; i += 8) {
+        if (i % 0x30 == 0x28 || i == 0) fprintf(stderr, "\n  +%03x:", i);
+        fprintf(stderr, " %016llx", (unsigned long long)*(volatile const uint64_t *)(list + i));
+    }
+    fprintf(stderr, "\n");
+}
+static int ubr_handle(CONTEXT *c) {
+    if (!ubr_loop || c->Rip != 0 || *(const uint64_t *)(uintptr_t)c->Rsp != (uint64_t)(uintptr_t)(ubr_loop + 0x3f)) return 0;
+    const unsigned char *list = (const unsigned char *)(uintptr_t)c->R14;
+    const uint64_t *table = (const uint64_t *)(uintptr_t)c->Rbx;
+    const uint32_t i = (uint32_t)c->R12;
+    volatile const uint16_t *type = (volatile const uint16_t *)(list + 0x28 + (uint64_t)i * 0x30);
+    const uint16_t first = *type;
+    const LONG n = InterlockedIncrement(&ubr_count);
+    const int log = n <= 8 || n % 100 == 0;
+    if (log) {
+        fprintf(stderr, "UC1 binding retry #%ld (thread %lu): entry %u of %u has type %#x, no handler\n", (long)n,
+                GetCurrentThreadId(), i, *(const uint32_t *)(list + 0x24), first);
+        ubr_dump("at the fault", list);
+    }
+    int waited = 0;
+    while (waited < 16 && !table[*type * 2]) { Sleep(1); ++waited; }
+    const uint16_t now = *type;
+    c->Rsp += 8; /* the call's return address */
+    if (table[now * 2]) {
+        c->R11 = c->R14; c->Rip = (DWORD64)(uintptr_t)ubr_loop; /* the loop reads the entry again */
+    } else {
+        c->Rip = (DWORD64)(uintptr_t)(ubr_loop + 0x3f); /* the next entry */
+    }
+    if (log) {
+        fprintf(stderr, "UC1 binding retry #%ld: after %d ms the type is %#x: %s\n", (long)n, waited, now,
+                table[now * 2] ? "run again" : "skipped");
+        if (now != first) ubr_dump("after the wait", list);
+        fflush(stderr);
+    }
+    return 1;
+}
 static int fatal_reported;
 static LONG fatal_exception(EXCEPTION_POINTERS *info) {
     if (__atomic_exchange_n(&fatal_reported,1,__ATOMIC_ACQ_REL)) { Sleep(INFINITE); }
@@ -143,6 +404,7 @@ static LONG fatal_exception(EXCEPTION_POINTERS *info) {
     fprintf(stderr,"  rax=%016llx rbx=%016llx rcx=%016llx rdx=%016llx\n  rsi=%016llx rdi=%016llx rbp=%016llx rsp=%016llx\n",
             c->Rax,c->Rbx,c->Rcx,c->Rdx,c->Rsi,c->Rdi,c->Rbp,c->Rsp);
     if (gpu_enabled) gow3gpu_dump_guest_writes(info);
+    cbw_dump_all();
     /* rbp chain (guest and host code keep frame pointers). */
     uintptr_t rbp=(uintptr_t)c->Rbp;
     for (int depth=0; depth<24 && rbp; ++depth) {
@@ -168,12 +430,34 @@ static LONG fatal_exception(EXCEPTION_POINTERS *info) {
 static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
     const EXCEPTION_RECORD *record=info->ExceptionRecord;
     DWORD code=record->ExceptionCode;
+    /* uc3 GOW3_CB_WATCH: its int3 and its debug register writes. */
+    if (cbw_site && code==EXCEPTION_BREAKPOINT && (unsigned char *)(uintptr_t)info->ContextRecord->Rip==cbw_site) {
+        CONTEXT *c=info->ContextRecord;
+        c->Rdi=c->Rbx+0x2d0; c->Rip+=7;
+        InterlockedIncrement64(&cbw_passes);
+        cbw_note_object(c->Rbx,0);
+        cbw_arm_self(c,c->Rbx);
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    if (cbw_birth_site && code==EXCEPTION_BREAKPOINT && (unsigned char *)(uintptr_t)info->ContextRecord->Rip==cbw_birth_site) {
+        CONTEXT *c=info->ContextRecord;
+        *(volatile uint64_t *)(uintptr_t)(c->Rbx+0x30)=0; c->Rip+=8;
+        InterlockedIncrement64(&cbw_births);
+        cbw_note_object(c->Rbx,1);
+        cbw_arm_self(c,c->Rbx);
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    if (cbw_site && code==EXCEPTION_SINGLE_STEP && (info->ContextRecord->Dr6 & 0xf)) {
+        cbw_note_write(info->ContextRecord);
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
     if (code==EXCEPTION_ACCESS_VIOLATION && record->NumberParameters>=2) {
         /* uc3: a speculative read gives up first. Resolving its fault through GPU page tracking
          * would wait for the GPU thread (a readback) while the reader holds locks that thread
          * needs: a draw-preparation worker keeps the pipeline cache shared-locked, and the GPU
          * thread waited for it exclusively (Uncharted 3, New Game). The GPU thread redoes that
          * work itself. */
+        if (record->ExceptionInformation[0]==8 && ubr_handle(info->ContextRecord)) return EXCEPTION_CONTINUE_EXECUTION;
         if (!runtime_fault_recover && gpu_enabled && gow3gpu_handle_fault(info,(void *)record->ExceptionInformation[1]))
             return EXCEPTION_CONTINUE_EXECUTION;
         if (runtime_fault_recover) {
@@ -1662,6 +1946,8 @@ int main(int argc, char **argv) {
         patch_job_spin(size, getenv("GOW3_JOB_SPIN") && getenv("GOW3_JOB_SPIN")[0] ? getenv("GOW3_JOB_SPIN") : NULL,
                        getenv("GOW3_JOB_SLEEP") && getenv("GOW3_JOB_SLEEP")[0] == '1');
 #ifdef _WIN32
+    if (getenv("GOW3_CB_WATCH") && getenv("GOW3_CB_WATCH")[0] == '1' && !check_imports) cbw_install(size);
+    if (getenv("GOW3_UC1_BIND_RETRY") && getenv("GOW3_UC1_BIND_RETRY")[0] == '1' && !check_imports) ubr_install(size);
     const int res_set = gpu_enabled && getenv("GOW3_UC3_RES") && getenv("GOW3_UC3_RES")[0];
     const int res_log = gpu_enabled && getenv("GOW3_UC3_RES_LOG") && getenv("GOW3_UC3_RES_LOG")[0] == '1';
     Uc3ResSite res_sites[UC_RES_MAX_SITES];

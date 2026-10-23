@@ -45,6 +45,8 @@ int gow3gpu_mouse_sample(float *dx, float *dy, uint32_t *buttons, int *wheel);
 unsigned gow3gpu_symbol_count(void);
 /* Windows thread id of the GPU command processor thread (0 until it starts; diagnostics). */
 unsigned long gow3gpu_cp_thread_id(void);
+/* uc3 GOW3_CB_WATCH: the guest's frame (submitDone calls) and the end-of-pipe flips reached. */
+void gow3gpu_frame_counters(uint64_t *submit_done, uint64_t *eop_flips);
 #ifdef __cplusplus
 }
 #endif

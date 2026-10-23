@@ -5,6 +5,7 @@
 #include <mutex>
 #include <unordered_set>
 #include <cstdio>
+#include <string>
 #include <cstdlib>
 #include <chrono>
 #include <xxhash.h>
@@ -812,6 +813,43 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
     return cache_image_id;
 }
 
+// ucndc: GOW3_MIP_FIX_TRACE=1 (diagnostic, off): how the images MIP_FIX gives mips to are made
+// and used. One line per image the first time it gets a mip through MIP_FIX, one per target
+// dropped for a larger image, and one per mip the first time it is used while its contents are
+// undefined (layout UNDEFINED with no upload pending).
+static bool MipFixTrace() {
+    static const bool on = std::getenv("GOW3_MIP_FIX_TRACE") != nullptr;
+    return on;
+}
+static bool MipFixTraceBudget() {
+    static std::atomic<int> lines{0};
+    return lines.fetch_add(1, std::memory_order_relaxed) < 2000;
+}
+static double MipFixTraceTime() {
+    static const auto start = std::chrono::steady_clock::now();
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+}
+/// The first time `key` is seen (image uid, or uid * 16 + mip).
+static bool MipFixFirst(u64 key) {
+    static std::mutex mutex;
+    static std::unordered_set<u64> seen;
+    std::scoped_lock lock{mutex};
+    return seen.insert(key).second;
+}
+static vk::ImageLayout MipLayout(const Image& image, u32 mip) {
+    const auto& states = image.backing->subresource_states;
+    const u32 index = mip * image.info.resources.layers;
+    return index < states.size() ? states[index].layout : image.backing->state.layout;
+}
+static std::string MipLayouts(const Image& image) {
+    std::string out;
+    for (u32 m = 0; m < image.info.resources.levels && m < 14; ++m) {
+        out += m ? "," : "";
+        out += vk::to_string(MipLayout(image, m));
+    }
+    return out;
+}
+
 std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& image_info,
                                                            BindingType binding,
                                                            ImageId cache_image_id,
@@ -1085,6 +1123,14 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
                 // We have a larger image created and a separate one, representing a subres of it
                 // bound as render target. In this case we need to rebind render target.
                 if (cache_image.binding.is_target) {
+                    if (MipFixTrace() && MipFixTraceBudget()) {
+                        std::printf("MIP_FIX trace: %.2f s target %#llx %ux%u fmt %s levels %u (mip %d of a new image) "
+                                    "dropped WITHOUT copying its contents, flags %#x\n",
+                                    MipFixTraceTime(), (unsigned long long)cache_image.info.guest_address,
+                                    cache_image.info.size.width, cache_image.info.size.height,
+                                    vk::to_string(cache_image.info.pixel_format).c_str(),
+                                    u32(cache_image.info.resources.levels), mip, u32(cache_image.flags));
+                    }
                     cache_image.binding.needs_rebind = 1u;
                     if (merged_image_id) {
                         GetImage(merged_image_id).binding.is_target = 1u;
@@ -1266,6 +1312,30 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
                 continue;
             }
             auto& single = slot_images[image_id];
+            // ucndc: GOW3_MIP_FIX_TRACE (see MipFixTrace).
+            if (MipFixTrace()) {
+                if (MipFixFirst(parent.image_uid << 1) && MipFixTraceBudget()) {
+                    std::printf("MIP_FIX trace: %.2f s parent %#llx %ux%u size %#llx fmt %s (vk %s) levels %u layers %u "
+                                "flags %#x dirty %d gpu %d target %d bound %d mips [%s]; gets mip %d slice %d from "
+                                "%#llx %ux%u pitch %u fmt %s flags %#x target %d\n",
+                                MipFixTraceTime(), (unsigned long long)parent.info.guest_address,
+                                parent.info.size.width, parent.info.size.height,
+                                (unsigned long long)parent.info.guest_size,
+                                vk::to_string(parent.info.pixel_format).c_str(),
+                                vk::to_string(instance.GetSupportedFormat(parent.info.pixel_format,
+                                                                          parent.format_features))
+                                    .c_str(),
+                                u32(parent.info.resources.levels), u32(parent.info.resources.layers),
+                                u32(parent.flags), int(True(parent.flags & ImageFlagBits::Dirty)),
+                                int(True(parent.flags & ImageFlagBits::GpuModified)),
+                                int(parent.binding.is_target), int(parent.binding.is_bound),
+                                MipLayouts(parent).c_str(), mip, slice,
+                                (unsigned long long)single.info.guest_address, single.info.size.width,
+                                single.info.size.height, single.info.pitch,
+                                vk::to_string(single.info.pixel_format).c_str(), u32(single.flags),
+                                int(single.binding.is_target));
+                }
+            }
             runtime.CopyMip(&single, &parent, mip, slice);
             if (single.binding.is_bound || single.binding.is_target) {
                 single.binding.needs_rebind = 1u;
@@ -1279,7 +1349,19 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     }
 
     if (!image_id) {
+        // ucndc: GOW3_OVERLAP_KEEP_VIEW=1 (fix, off; launcher turns it on): a later image in the
+        // region that only overlaps by chance (it gives back the image already found, or none)
+        // no longer drops the mip/slice found for that image. Before, a target at the address of
+        // a mip (UC3 bloom mips 1 and 2) resolved to mip 0 of its image whenever an unrelated
+        // image (UC3: a 512x512 table at 0x1145620000) shared the region after it, so the mip
+        // was written into the corner of mip 0 and the real mip kept an old frame (red spots).
+        static const bool keep_view = [] {
+            const char* v = std::getenv("GOW3_OVERLAP_KEEP_VIEW");
+            return v && v[0] == '1';
+        }();
         for (const auto& cache_id : image_ids) {
+            const ImageId found_id = image_id;
+            const int found_mip = view_mip, found_slice = view_slice;
             view_mip = -1;
             view_slice = -1;
 
@@ -1290,6 +1372,10 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
                 image_id = overlap_image_id;
                 view_mip = overlap_view_mip;
                 view_slice = overlap_view_slice;
+            }
+            if (keep_view && found_id && image_id == found_id && view_mip < 0 && view_slice < 0) {
+                view_mip = found_mip;
+                view_slice = found_slice;
             }
         }
     }
@@ -1322,6 +1408,30 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     }
     if (view_slice > 0) {
         desc.view_info.range.base.layer = view_slice;
+    }
+
+    // ucndc: GOW3_MIP_FIX_TRACE: a mip of a multi-level image used while its contents are
+    // undefined (no upload pending).
+    if (MipFixTrace() && ImageInfo::MipFixEnabled() &&
+        image.info.resources.levels > 1 && False(image.flags & ImageFlagBits::Dirty)) {
+        const u32 first = view_mip > 0 ? u32(view_mip) : 0u;
+        const u32 end = std::min<u32>(image.info.resources.levels, first + info.resources.levels);
+        for (u32 m = first; m < end; ++m) {
+            if (MipLayout(image, m) != vk::ImageLayout::eUndefined) {
+                continue;
+            }
+            if (MipFixFirst(((image.image_uid * 16 + m) << 1) | 1) && MipFixTraceBudget()) {
+                std::printf("MIP_FIX trace: %.2f s mip %u of %#llx %ux%u fmt %s levels %u used as %s while "
+                            "UNDEFINED (flags %#x, mips [%s])\n",
+                            MipFixTraceTime(), m, (unsigned long long)image.info.guest_address,
+                            image.info.size.width, image.info.size.height,
+                            vk::to_string(image.info.pixel_format).c_str(),
+                            u32(image.info.resources.levels),
+                            desc.type == BindingType::Texture ? "texture" :
+                            desc.type == BindingType::Storage ? "storage" : "target",
+                            u32(image.flags), MipLayouts(image).c_str());
+            }
+        }
     }
 
     // ucndc: GOW3_MIP_TRACE=1: requests in the bloom and distortion chains and what they resolve to.

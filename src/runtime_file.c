@@ -31,7 +31,7 @@ typedef struct stat HostStat;
 #endif
 #define ERR(n) ((int32_t)(UINT32_C(0x80020000)|(n)))
 #define MAX_FILES 1024
-#define MAX_MOUNTS 16
+#define MAX_MOUNTS 32
 
 typedef struct { int64_t sec, nsec; } GuestTimespec;
 typedef struct {
@@ -89,6 +89,27 @@ void runtime_file_configure(const char *app0,const char *user) {
         mkdir(path,0755);
         char guest[32]; snprintf(guest,sizeof(guest),"/%s",writable[i]);
         runtime_file_mount(guest,path);
+    }
+    /* GOW3_ICON_ROOT + GOW3_ICON_FILES (paths in the game folder, ';'-separated): the launcher's copies
+     * of game files redrawn with the player's keys (launcher key_icon_files), read in place of the game's. */
+    const char *icon_root=getenv("GOW3_ICON_ROOT"), *icon_files=getenv("GOW3_ICON_FILES");
+    const char *icon_error=getenv("GOW3_ICON_ERROR");
+    if (icon_error && *icon_error) printf("Key icons: not made (%s); those keep the controller icons\n",icon_error);
+    for (const char *p=icon_files;icon_root && p && *p;) {
+        const char *end=strchr(p,';');
+        size_t n=end ? (size_t)(end-p) : strlen(p);
+        char rel[256], host[600], guest[300];
+        if (n && n<sizeof(rel)) {
+            memcpy(rel,p,n); rel[n]=0;
+            for (char *c=rel;*c;++c) if (*c=='\\') *c='/';
+            snprintf(host,sizeof(host),"%s/%s",icon_root,rel);
+            snprintf(guest,sizeof(guest),"/app0/%s",rel);
+            runtime_file_mount(guest,host);
+            snprintf(guest,sizeof(guest),"/hostapp/%s",rel);
+            runtime_file_mount(guest,host);
+            printf("Key icons: /app0/%s from %s\n",rel,host);
+        }
+        p=end ? end+1 : NULL;
     }
 }
 /* Resolve a guest path to a host path; returns 0 or a host errno. */
