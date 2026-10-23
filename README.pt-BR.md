@@ -1,9 +1,11 @@
-# Uncharted: The Nathan Drake Collection para PC (port nativo)
+# Uncharted: The Nathan Drake Collection para PC
 
 [English](README.md) | **Português (Brasil)**
 
-Port nativo para Windows 10 e 11 dos jogos da **Uncharted: The Nathan Drake Collection** (PS4,
-Bluepoint, 2015). O foco é o **Uncharted 3: Drake's Deception**, jogável do início ao fim a 60 FPS em 1080p, sem upscaling nem geração de quadros; o Uncharted 2
+Roda os jogos da **Uncharted: The Nathan Drake Collection** (PS4, Bluepoint, 2015) no Windows 10
+e 11. Não é um port do código-fonte nem um emulador clássico: o executável original do PS4 roda
+direto no processador do PC, sobre uma camada de compatibilidade que substitui o sistema do PS4 e
+traduz os gráficos para Vulkan (veja [Como funciona](#como-funciona)). O foco é o **Uncharted 3: Drake's Deception**, jogável do início ao fim a 60 FPS em 1080p, sem upscaling nem geração de quadros; o Uncharted 2
 é jogável e o Uncharted 1 roda (experimental).
 
 > **Nenhum arquivo do jogo está incluído.** Você precisa do dump do seu próprio PS4
@@ -117,8 +119,8 @@ O diário do projeto, com o que foi feito e por quê, está em [docs/uc3/DEVLOG.
 
 ## Diferença para o uncharted_pc do Supermedo
 
-O [uncharted_pc](https://github.com/Supermedo/uncharted_pc) do Supermedo é outro port nativo da mesma
-coletânea, também GPL e da mesma família (os dois descendem do bloodborne_pc do deadinside28). Os dois
+O [uncharted_pc](https://github.com/Supermedo/uncharted_pc) do Supermedo é outro port da mesma
+coletânea, feito do mesmo jeito, também GPL e da mesma família (os dois descendem do bloodborne_pc do deadinside28). Os dois
 foram feitos em paralelo, e este aqui aproveitou várias correções dele, sempre com crédito (ver
 [Créditos](#créditos)). A comparação abaixo é com a versão 0.3.1 dele (15/10/2026):
 
@@ -215,7 +217,7 @@ A lista completa, com medições, está no [DEVLOG](docs/uc3/DEVLOG.md).
 
 ## Créditos
 
-- **deadinside28**: [bloodborne_pc](https://github.com/deadinside28/bloodborne_pc), o port nativo
+- **deadinside28**: [bloodborne_pc](https://github.com/deadinside28/bloodborne_pc), o port para PC
   original (a base de tudo, também chamada de bbport).
 - **Supermedo** (Mohammed Albarghouthi): o [port do Bloodborne para Windows](https://github.com/Supermedo/bloodborne_pc)
   e o [uncharted_pc](https://github.com/Supermedo/uncharted_pc), de onde vieram ideias e correções

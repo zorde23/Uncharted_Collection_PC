@@ -1,9 +1,11 @@
-# Uncharted: The Nathan Drake Collection for PC (native port)
+# Uncharted: The Nathan Drake Collection for PC
 
 **English** | [Português (Brasil)](README.pt-BR.md)
 
-A native Windows 10 and 11 port of the games in **Uncharted: The Nathan Drake Collection** (PS4,
-Bluepoint, 2015). The focus is **Uncharted 3: Drake's Deception**, playable from start to end at 60 FPS in 1080p with no upscaling or frame generation;
+Runs the games of **Uncharted: The Nathan Drake Collection** (PS4, Bluepoint, 2015) on Windows 10
+and 11. It is not a source port and not a classic emulator: the original PS4 executable runs
+directly on the PC's CPU, on top of a compatibility layer that replaces the PS4 system and
+translates its graphics to Vulkan (see [How it works](#how-it-works)). The focus is **Uncharted 3: Drake's Deception**, playable from start to end at 60 FPS in 1080p with no upscaling or frame generation;
 Uncharted 2 is playable and Uncharted 1 runs (experimental).
 
 > **No game files are included.** You need a dump from your own PS4
@@ -118,8 +120,8 @@ The project log (in Portuguese), with what was done and why, is in
 
 ## How this differs from Supermedo's uncharted_pc
 
-Supermedo's [uncharted_pc](https://github.com/Supermedo/uncharted_pc) is another native port of the
-same collection, also GPL and from the same family (both descend from deadinside28's bloodborne_pc).
+Supermedo's [uncharted_pc](https://github.com/Supermedo/uncharted_pc) is another port of the
+same collection, built the same way, also GPL and from the same family (both descend from deadinside28's bloodborne_pc).
 The two were made in parallel, and this one took several of its fixes, always credited (see
 [Credits](#credits)). Compared with its version 0.3.1 (2026-10-15):
 
@@ -218,7 +220,7 @@ The full list, with measurements, is in the [DEVLOG](docs/uc3/DEVLOG.md).
 ## Credits
 
 - **deadinside28**: [bloodborne_pc](https://github.com/deadinside28/bloodborne_pc), the original
-  native port (the base of everything, also called bbport).
+  PC port (the base of everything, also called bbport).
 - **Supermedo** (Mohammed Albarghouthi): the [Bloodborne Windows port](https://github.com/Supermedo/bloodborne_pc)
   and [uncharted_pc](https://github.com/Supermedo/uncharted_pc), the source of ideas and fixes used
   here (scalar constant copy HLE, addr64 `BUFFER_LOAD`, Ajm end-of-job rules, the `m_gfxEopTick` wait patch from 0.3.2, read-only `O_CREAT` open for Uncharted 1 sound, the Intel GPU fix from 0.3.3).
