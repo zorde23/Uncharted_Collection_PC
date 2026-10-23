@@ -59,6 +59,41 @@ def frame(d, r):
     d.rounded_rectangle(r, radius=8, fill=CAP, outline=EDGE, width=2)
 
 
+# Keycaps in the game's style: the cap is the game's own touchpad button (glyph 14 of the atlas, the
+# journal button of the HUD), its ends kept and its clean middle repeated to the key's width; the hand
+# in the middle of it is never used. Made on the player's PC from their game files.
+KEY_MATERIAL = None  # RGBA; build_atlas sets it from the game's atlas
+
+
+def trim(img):
+    """`img` cut to its visible part."""
+    box = img.getchannel('A').point(lambda v: 255 if v > 40 else 0).getbbox()
+    return img.crop(box) if box else img
+
+
+def game_key(w, h, lit=False, material=None):
+    """A keycap w x h from the game's button (`material`, else KEY_MATERIAL), or None without one.
+    `lit` turns it orange (the key to press now, in the HUD's turning-stick prompts)."""
+    mat = material or KEY_MATERIAL
+    if mat is None:
+        return None
+    w, h = max(2, int(round(w))), max(2, int(round(h)))
+    mw = max(4, round(mat.width * h / mat.height))
+    m = mat.resize((mw, h), Image.LANCZOS)
+    b = min(int(mw * 0.25), w // 2)
+    out = Image.new('RGBA', (w, h), (0, 0, 0, 0))
+    out.paste(m.crop((0, 0, b, h)), (0, 0))
+    out.paste(m.crop((mw - b, 0, mw, h)), (w - b, 0))
+    strip = m.crop((b, 0, b + max(1, int(mw * 0.08)), h))  # clean part left of the hand
+    for x in range(b, w - b, strip.width):
+        out.paste(strip.crop((0, 0, min(strip.width, w - b - x), h)), (x, 0))
+    if lit:
+        lum = out.convert('L').point(lambda v: min(255, v * 2 + 40))
+        tint = [lum.point(lambda v, c=c: v * c // 255) for c in HI[:3]]
+        out = Image.merge('RGBA', (*tint, out.getchannel('A')))
+    return out
+
+
 def keycap(img, box, label, font_path):
     """A key with the label at LABEL size; a label wider than the key can get is squeezed sideways,
     so every label keeps the same height."""
@@ -68,11 +103,19 @@ def keycap(img, box, label, font_path):
     _, ct, _, cb = d.textbbox((0, 0), 'H', font=f)
     tw, room = r_ - l, box[2] - 2 - 10
     r = cap_rect(box, min(tw, room) + 10)
-    frame(d, r)
+    cap = game_key(r[2] - r[0] + 1, r[3] - r[1] + 1)
+    if cap:
+        img.alpha_composite(cap, (r[0], r[1]))
+    else:
+        frame(d, r)
     text = Image.new('RGBA', (tw, b - t), (0, 0, 0, 0))
     ImageDraw.Draw(text).text((-l, -t), label, font=f, fill=INK)
     if tw > room:
         text = text.resize((room, text.height), Image.LANCZOS)
+    if cap:  # a dark shadow, as the game's lettering
+        shadow = Image.new('RGBA', text.size, (0, 0, 0, 0))
+        shadow.putalpha(text.getchannel('A'))
+        img.alpha_composite(shadow, (int((r[0] + r[2] + 1 - text.width) / 2) + 1, int((r[1] + r[3] + 1 - (cb - ct)) / 2 - ct + t) + 1))
     # Centered on the cap height of the font, so all labels sit on the same line.
     img.alpha_composite(text, (int((r[0] + r[2] + 1 - text.width) / 2), int((r[1] + r[3] + 1 - (cb - ct)) / 2 - ct + t)))
 
@@ -413,6 +456,11 @@ def build_atlas(fnt_text, keys, font_path, size=512, short=SHORT, style='keys', 
                 source = chars.get(29) if button == 'touchpad_left' else None
                 xbox_glyph(img, chars[gid], button, font_path, source)
         return img
+    global KEY_MATERIAL
+    KEY_MATERIAL = None
+    if original is not None and 14 in chars:  # the touchpad button
+        x, y, w, h = chars[14]
+        KEY_MATERIAL = trim(original.convert('RGBA').crop((x, y, x + w, y + h)))
     img = Image.new('RGBA', (size, size), (0, 0, 0, 0))
     for gid, button in GLYPHS.items():
         if gid in chars:
@@ -475,10 +523,10 @@ def names_of(arc):
 
 
 def write_psarc(arc, replace, path):
-    """Copies the archive with the entries named in `replace` ({name: bytes of the SAME size}) replaced.
-    Everything else stays byte for byte: the new blocks go at the end of the file and only the
-    entry's offset and its block sizes in the table change (same block count, so the table keeps
-    its length)."""
+    """Copies the archive with the entries named in `replace` ({name: bytes}) replaced; a new entry
+    may change size as long as it keeps its block count. Everything else stays byte for byte: the new
+    blocks go at the end of the file and only the entry's size, offset and block sizes in the table
+    change (same block count, so the table keeps its length)."""
     ver, comp, flags, bs, width = arc['head']
     names = names_of(arc)
     data = bytearray(arc['data'])
@@ -488,7 +536,7 @@ def write_psarc(arc, replace, path):
         if name not in replace:
             continue
         e, payload = arc['entries'][i], replace[name]
-        assert len(payload) == e['size'], (name, len(payload), e['size'])
+        assert -(-len(payload) // bs) == -(-e['size'] // bs), (name, len(payload), e['size'])
         offset = len(data)
         for j, pos in enumerate(range(0, len(payload), bs)):
             chunk = payload[pos:pos + bs]
@@ -499,6 +547,7 @@ def write_psarc(arc, replace, path):
             zpos = 32 + 30 * n + width * (e['block'] + j)
             data[zpos:zpos + width] = field.to_bytes(width, 'big')
         tpos = 32 + 30 * (i)
+        data[tpos + 20:tpos + 25] = len(payload).to_bytes(5, 'big')
         data[tpos + 25:tpos + 30] = offset.to_bytes(5, 'big')
     assert toclen == 32 + 30 * n + width * len(arc['zs'])
     open(path, 'wb').write(bytes(data))
@@ -512,12 +561,10 @@ def make_icon_psarc(src, dst, keys, font_path, preview=None, english=False, styl
     tga = fnt[:-4] + '_00.tga'
     like = read_entry(arc, arc['entries'][idx[tga]])
     alpha = fnt.rsplit('/', 1)[0] + '/symbol_alpha.tga'
-    original = None
-    if style == 'xbox':
-        import io
-        original = Image.open(io.BytesIO(like)).convert('RGBA')
-        if like[16] == 24 and alpha in idx:
-            original.putalpha(Image.open(io.BytesIO(read_entry(arc, arc['entries'][idx[alpha]]))).convert('L'))
+    import io
+    original = Image.open(io.BytesIO(like)).convert('RGBA')  # the game's glyphs (Xbox; the keycap)
+    if like[16] == 24 and alpha in idx:
+        original.putalpha(Image.open(io.BytesIO(read_entry(arc, arc['entries'][idx[alpha]]))).convert('L'))
     atlas = build_atlas(read_entry(arc, arc['entries'][idx[fnt]]).decode('latin1'), keys, font_path,
                         short=SHORT_EN if english else SHORT, style=style, original=original)
     replace = {tga: tga_bytes(atlas, like)}
@@ -529,3 +576,45 @@ def make_icon_psarc(src, dst, keys, font_path, preview=None, english=False, styl
         bg.alpha_composite(atlas)
         bg.convert('RGB').save(preview)
     return list(replace)
+
+
+# ---- Uncharted 1 texts: the one prompt where the left stick glyph means "click it" ----------------
+# UC1 draws the left stick (|A|) both for "move" (WASD) and in "Click left |A| to switch shoulders",
+# which is L3. With keyboard icons that line gets |L3| instead, in every language (same string id).
+# The text files (text1/ps4/N.common in core.psarc) are a count, (id, offset) pairs, then the strings.
+L3_TEXTS = {0x3a8f5837}
+
+
+def patch_common(d, ids=L3_TEXTS, old=b'|A|', new=b'|L3|'):
+    n = struct.unpack('>I', d[:4])[0]
+    base = 4 + n * 8
+    ents = [list(struct.unpack('>II', d[4 + i * 8:12 + i * 8])) for i in range(n)]
+    body = bytearray(d[base:])
+    for e in ents:
+        if e[0] not in ids:
+            continue
+        end = body.index(b'\0', e[1])
+        at = body.find(old, e[1], end)
+        if at < 0:
+            continue
+        body[at:at + len(old)] = new
+        for f in ents:
+            if f[1] > at:
+                f[1] += len(new) - len(old)
+    return struct.pack('>I', n) + b''.join(struct.pack('>II', *e) for e in ents) + bytes(body)
+
+
+def make_text_psarc(src, dst, keys, font_path, preview=None, english=False, style='keys'):
+    """core.psarc of Uncharted 1 with the L3 prompt fixed (keyboard icons only)."""
+    arc = read_psarc(src)
+    names = names_of(arc)
+    replace = {}
+    for i, name in enumerate(names, 1):
+        if name.startswith('text1/') and name.endswith('.common'):
+            old = read_entry(arc, arc['entries'][i])
+            new = patch_common(old)
+            if new != old:
+                replace[name] = new
+    write_psarc(arc, replace, dst)
+    return list(replace)
+

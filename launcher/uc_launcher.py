@@ -197,10 +197,12 @@ CONTROL_DEFAULTS = {'mouse_look': True, 'mouse_sensitivity': 1.0, 'mouse_aim_sen
 ICON_FILES = {'uc1': ('u1data/data.psarc', 'u1data/build/main/pak19/ps4/particle.pak'),
               'uc2': ('u2data/data.psarc', 'u2data/build/main/pak22/ps4/hud.pak'),
               'uc3': ('u3data/data.psarc', 'u3data/build/main/pak23/ps4/hud.pak')}
+# Keyboard icons only: UC1's texts, where "Click left |A|" (the left stick, WASD here) becomes |L3|.
+ICON_TEXT_FILES = {'uc1': ('u1data/build/main/core.psarc',)}
 ICON_FONTS = [Path(os.environ.get('WINDIR', r'C:\Windows')) / 'Fonts' / name
               for name in ('arialbd.ttf', 'arial.ttf', 'segoeuib.ttf')] + \
              [Path('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf')]
-KEY_ICONS_VERSION = 4  # raise when key_icons.py draws differently, so old copies are made again
+KEY_ICONS_VERSION = 5  # raise when key_icons.py draws differently, so old copies are made again
 # Controls > icons in the game: the game's own PlayStation buttons, Xbox buttons in the game's style or the keys.
 ICON_STYLES = ('ps', 'xbox', 'keys')
 
@@ -453,7 +455,7 @@ def key_icon_files(settings, key):
         return [], ['no font for the key names']
     keys = {**DEFAULT_KEYS, **(controls.get('keys') or {})}
     made, errors = [], []
-    for name in ICON_FILES[key]:
+    for name in ICON_FILES[key] + (ICON_TEXT_FILES.get(key, ()) if style == 'keys' else ()):
         sources = [Path(d) / name for d in (settings.get('update_dir'), settings.get('game_dir')) if d]
         source = next((p for p in sources if p.is_file()), None)
         if not source:
@@ -465,7 +467,9 @@ def key_icon_files(settings, key):
         mark = target.with_name(target.name + '.txt')
         try:
             if not (target.is_file() and mark.is_file() and mark.read_text(encoding='utf-8') == stamp):
-                if name.endswith('.psarc'):
+                if name.endswith('core.psarc'):
+                    from key_icons import make_text_psarc as make
+                elif name.endswith('.psarc'):
                     from key_icons import make_icon_psarc as make  # Pillow
                 else:
                     from hud_icons import make_hud_pak as make

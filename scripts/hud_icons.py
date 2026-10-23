@@ -140,6 +140,7 @@ class Canvas:
 
 
 SHORT = K.SHORT  # labels; make_hud_pak(english=True) uses K.SHORT_EN
+MATERIAL = None  # the keycap: the game's journal button (TOUCHPAD), see K.game_key
 STYLE = 'keys'  # make_hud_pak(style='xbox'): Xbox-style pad restyled from the game's own pictures
 
 
@@ -159,9 +160,17 @@ def key(c, box, label, font, fill=CAP, depth=0, squash=1.0, hi=False):
         c.d.rounded_rectangle((x0, y0 + dp, x1, y1), r, fill=tuple(v // 2 for v in EDGE))
         c.da.rounded_rectangle((x0, y0 + dp, x1, y1), r, fill=255)
     top = (x0, y0, x1, y1 - dp)
-    c.d.rounded_rectangle(top, r, fill=HI if hi else fill, outline=EDGE, width=lw)
-    c.da.rounded_rectangle(top, r, fill=255)
+    cap = K.game_key(x1 - x0, y1 - dp - y0, lit=hi, material=MATERIAL) if MATERIAL and fill == CAP else None
+    if cap:  # the game's own button as the keycap
+        c.rgb.paste(cap.convert('RGB'), (int(x0), int(y0)), cap.getchannel('A'))
+        c.a.paste(255, (int(x0), int(y0), int(x0) + cap.width, int(y0) + cap.height), cap.getchannel('A'))
+    else:
+        c.d.rounded_rectangle(top, r, fill=HI if hi else fill, outline=EDGE, width=lw)
+        c.da.rounded_rectangle(top, r, fill=255)
     if label:
+        if cap:  # a dark shadow under the letters, as the game's lettering
+            o = max(1, (x1 - x0) * 0.02)
+            text(c, (x0 + o, y0 + o, x1 + o, y1 - dp + o), label, font, squash, (0, 0, 0))
         text(c, top, label, font, squash, CAP if hi else INK)
 
 
@@ -409,6 +418,17 @@ def make_hud_pak(src, dst, keys, font, preview=None, english=False, style='keys'
     def original(short):
         t = by_short.get(short.lower())
         return read_image(data, t) if t else None
+
+    global MATERIAL
+    MATERIAL = None
+    pic = original('journal-select-color')
+    if pic is not None:  # its button, rounded corners cut out
+        k = pic.width / 512
+        x0, y0, x1, y1 = (int(v * k) for v in TOUCHPAD['journal-select'])
+        MATERIAL = pic.convert('RGBA').crop((x0, y0, x1, y1))
+        m = Image.new('L', MATERIAL.size, 0)
+        ImageDraw.Draw(m).rounded_rectangle((0, 0, m.width - 1, m.height - 1), int(m.height * 0.11), fill=255)
+        MATERIAL.putalpha(m)
 
     done = []
     for t in texs:
