@@ -200,7 +200,15 @@ ICON_FILES = {'uc1': ('u1data/data.psarc', 'u1data/build/main/pak19/ps4/particle
 ICON_FONTS = [Path(os.environ.get('WINDIR', r'C:\Windows')) / 'Fonts' / name
               for name in ('arialbd.ttf', 'arial.ttf', 'segoeuib.ttf')] + \
              [Path('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf')]
-KEY_ICONS_VERSION = 2  # raise when key_icons.py draws differently, so old copies are made again
+KEY_ICONS_VERSION = 4  # raise when key_icons.py draws differently, so old copies are made again
+# Controls > icons in the game: the game's own PlayStation buttons, Xbox buttons in the game's style or the keys.
+ICON_STYLES = ('ps', 'xbox', 'keys')
+
+
+def icon_style(controls):
+    """'ps', 'xbox' or 'keys'; launcher.json from 0.3.5 betas only has key_icons (True = keys)."""
+    style = controls.get('icons')
+    return style if style in ICON_STYLES else 'keys' if controls.get('key_icons') else 'ps'
 # Tk key names -> SDL key names (letters and digits map to themselves, upper case).
 TK_KEYS = {'space': 'Space', 'Return': 'Return', 'Escape': 'Escape', 'Tab': 'Tab', 'BackSpace': 'Backspace',
            'Shift_L': 'Left Shift', 'Shift_R': 'Right Shift', 'Control_L': 'Left Ctrl',
@@ -432,11 +440,13 @@ def launcher_option(name):
 
 
 def key_icon_files(settings, key):
-    """The game files redrawn with the player's keys (Controls > keyboard icons), kept in user\\icones\\
-    under their path in the game folder and made again only when the keys change. Returns the files made
-    (paths in the game folder) and the errors; a file that cannot be made stays the game's own."""
+    """The game files redrawn with the player's keys or as Xbox buttons (Controls > icons in
+    the game), kept in user\\icones\\ under their path in the game folder and made again only when the
+    choice or the keys change. Returns the files made (paths in the game folder) and the errors; a file
+    that cannot be made stays the game's own."""
     controls = settings.get('controls') or {}
-    if not controls.get('key_icons') or key not in ICON_FILES:
+    style = icon_style(controls)
+    if style == 'ps' or key not in ICON_FILES:
         return [], []
     font = next((f for f in ICON_FONTS if f.is_file()), None)
     if not font:
@@ -450,7 +460,7 @@ def key_icon_files(settings, key):
             errors.append(f'no {name}')
             continue
         stamp = hashlib.sha256(json.dumps([KEY_ICONS_VERSION, str(source), source.stat().st_size, str(font), LANG,
-                                           keys], sort_keys=True).encode()).hexdigest()
+                                           style, keys], sort_keys=True).encode()).hexdigest()
         target = USER_DIR / 'icones' / name
         mark = target.with_name(target.name + '.txt')
         try:
@@ -461,7 +471,7 @@ def key_icon_files(settings, key):
                     from hud_icons import make_hud_pak as make
                 target.parent.mkdir(parents=True, exist_ok=True)
                 partial = target.with_name(target.name + '.part')
-                make(source, partial, keys, str(font), english=LANG != 'pt')
+                make(source, partial, keys, str(font), english=LANG != 'pt', style=style)
                 os.replace(partial, target)
                 mark.write_text(stamp, encoding='utf-8')
             made.append(name)
@@ -1047,15 +1057,20 @@ class Launcher:
         invert = tk.BooleanVar(value=bool(self.ctl['mouse_invert_y']))
         put(tk.Checkbutton(body, text=_('Inverter o mouse na vertical', 'Invert the mouse vertically'),
                            variable=invert, **check))
-        key_icons = tk.BooleanVar(value=bool(self.ctl.get('key_icons')))
-        put(tk.Checkbutton(body, text=_('Ícones de teclado no jogo', 'Keyboard icons in the game'),
-                           variable=key_icons, **check), 6)
-        put(self.label(body, _('Textos e avisos na tela (como "Pressione △" e o △ sobre objetos) mostram as suas teclas '
-                               'no lugar dos botões do controle. Vale para a sessão inteira; desligue se for jogar '
-                               'com controle.',
-                               'Texts and on-screen prompts (such as "Press △" and the △ over objects) show your keys '
-                               'instead of the controller buttons. It applies to the whole session; turn it off to '
-                               'play with a controller.'),
+        icons = tk.StringVar(value=icon_style(self.ctl))
+        put(self.label(body, _('Ícones no jogo', 'Icons in the game'), 10, TEXT), 6)
+        line = tk.Frame(body, bg=PANEL)
+        for value, text in (('ps', _('Controle PlayStation', 'PlayStation controller')),
+                            ('xbox', _('Controle Xbox', 'Xbox controller')),
+                            ('keys', _('Teclado e mouse', 'Keyboard and mouse'))):
+            tk.Radiobutton(line, text=text, value=value, variable=icons, **check).pack(side='left', padx=(0, 12))
+        put(line)
+        put(self.label(body, _('Os botões dos textos e dos avisos na tela (como "Pressione △" e o △ sobre objetos). '
+                               'Xbox usa os botões do jogo com A, B, X, Y, LB, RT...; Teclado e mouse mostra as suas '
+                               'teclas. Vale ao abrir o jogo: depois de trocar, feche o jogo e abra de novo.',
+                               'The buttons in texts and on-screen prompts (such as "Press △" and the △ over objects). '
+                               "Xbox uses the game's buttons with A, B, X, Y, LB, RT...; Keyboard and mouse shows your keys. "
+                               'It applies when the game starts: after changing it, close the game and start it again.'),
                        9, MUTED, wraplength=560, justify='left'))
 
         put(self.label(body, _('Teclado e botões do mouse', 'Keyboard and mouse buttons'), 11, TEXT, True), 16)
@@ -1118,7 +1133,8 @@ class Launcher:
         def save():
             self.ctl.update(mouse_look=look.get(), mouse_sensitivity=round(sensitivity.get(), 2),
                             mouse_aim_sensitivity=round(aim_sensitivity.get(), 2),
-                            mouse_invert_y=invert.get(), pad_invert_y=pad_invert.get(), key_icons=key_icons.get())
+                            mouse_invert_y=invert.get(), pad_invert_y=pad_invert.get(), icons=icons.get(),
+                            key_icons=icons.get() == 'keys')
             self.ctl['keys'] = {a: v for a, v in self.ctl['keys'].items() if v != DEFAULT_KEYS[a]}
             self.ctl['pad'] = {a: values[b.current()] for a, b in pad_boxes.items()
                                if values[b.current()] != DEFAULT_PAD[a]}

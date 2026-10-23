@@ -140,6 +140,7 @@ class Canvas:
 
 
 SHORT = K.SHORT  # labels; make_hud_pak(english=True) uses K.SHORT_EN
+STYLE = 'keys'  # make_hud_pak(style='xbox'): Xbox-style pad restyled from the game's own pictures
 
 
 def label_for(keys, action):
@@ -225,7 +226,7 @@ def mouse(c, box, which, arrow=None, ring=None):
         c.da.polygon(pts, fill=255)
     if ring is not None:
         cx, cy, rad = ox + mw / 2, oy + mh * 0.62, mw * 0.32
-        start = ring * 90
+        start = -ring * 90  # the gap turns counter-clockwise, as the game's stick
         c.d.arc((cx - rad, cy - rad, cx + rad, cy + rad), start, start + 270, fill=HI, width=lw * 2)
 
 
@@ -252,7 +253,7 @@ STICK_L = {'middle-analog': None, 'left-analog': 'ls_left', 'right-analog': 'ls_
            'toward-analog': 'ls_down', 'away-analog': 'ls_up'}
 STICK_R = {'middle-analogRight': None, 'left-analogRight': 'left', 'right-analogRight': 'right',
            'toward-analogRight': 'down', 'away-analogRight': 'up'}
-ROTATE_L = ['ls_up', 'ls_right', 'ls_down', 'ls_left']
+ROTATE_L = ['ls_left', 'ls_down', 'ls_right', 'ls_up']  # the game's stick turns counter-clockwise
 TOUCHPAD = {'journal-select': (135, 64, 298, 162), 'map-select': (135, 64, 298, 162),
             'journal-add-page': (146, 116, 267, 188)}
 
@@ -266,6 +267,8 @@ def picture(short, w, h, keys, font, original):
 
     def sc(box, ref=(256, 256)):  # boxes below are for the usual texture size; scale to this one
         return (box[0] * w / ref[0], box[1] * h / ref[1], box[2] * w / ref[0], box[3] * h / ref[1])
+    if STYLE == 'xbox':
+        return xbox_picture(c, base, short, sc, w, original, font)
     m = re.match(r'(?i)(x|circle|square|triangle)-button$', base)
     if m:  # flat face button, shown in the button-trans circle
         lab = label_for(keys, FACE[m.group(1).lower()])
@@ -342,6 +345,44 @@ def picture(short, w, h, keys, font, original):
     return None
 
 
+def xbox_picture(c, base, short, sc, w, original, font):
+    """The Xbox-style pad, restyled from the game's own pictures: face buttons (flat and 3D),
+    shoulders and triggers get A/B/X/Y and LB/RB/LT/RT, the touchpad pictures get View. The
+    transparency textures stay the game's (same shapes); sticks and d-pad stay the game's own."""
+    trans = re.search(r'(?i)trans', short)
+
+    def done(img):
+        if img is None:
+            return None
+        rgb = img.convert('RGB')
+        return rgb, Image.new('L', rgb.size, 255)
+    m = re.match(r'(?i)(x|circle|square|triangle)-button$', base)
+    if m:
+        return None if trans else done(K.restyle_face(original(short), FACE[m.group(1).lower()], font))
+    m = re.match(r'(?i)(triangle|circle|square)-button-(up|down)(?:-round)?$', base)
+    if m:  # 3D face button over objects (UP raised, DOWN pressed): the top seen at an angle
+        if trans:
+            return None
+        k = w / 512
+        zone = (190, 195, 324, 281) if m.group(2).lower() == 'up' else (184, 215, 330, 302)
+        return done(K.restyle_face(original(short), FACE[m.group(1).lower()], font,
+                                   zone=tuple(v * k for v in zone), squash=0.62))
+    m = re.match(r'(?i)([LR][12])-button$', base)
+    if m:
+        return None if trans else done(K.restyle_label(original(short), K.XBOX_LABEL[m.group(1).lower()], font))
+    for name, box in TOUCHPAD.items():
+        if base.lower() == name:
+            old_rgb, old_a = original(name + '-color'), original(name + '-trans')
+            if old_rgb is None or old_a is None:
+                return None
+            c.rgb.paste(old_rgb.convert('RGB').resize(c.rgb.size), (0, 0))
+            c.a.paste(old_a.convert('L').resize(c.a.size), (0, 0))
+            c.d.rectangle(c.s((box[0] - 4, box[1] - 4, box[2] + 4, box[3] + 4)), fill=(236, 230, 180))
+            key(c, box, 'View', font)
+            return c.done()
+    return None
+
+
 def key_or_mouse(c, box, keys, action, font, shoulder=False):
     lab, raw = label_for(keys, action)
     if raw in K.MOUSE:
@@ -356,9 +397,10 @@ def key_or_mouse(c, box, keys, action, font, shoulder=False):
 
 
 # ---- whole pak ---------------------------------------------------------------------------------
-def make_hud_pak(src, dst, keys, font, preview=None, english=False):
-    global SHORT
+def make_hud_pak(src, dst, keys, font, preview=None, english=False, style='keys'):
+    global SHORT, STYLE
     SHORT = K.SHORT_EN if english else K.SHORT
+    STYLE = style
     data = open(src, 'rb').read()
     buf = bytearray(data)
     texs = [t for t in textures(data) if '/buttons/' in t['name'] and t['fmt'] in (BC1, BC1_SRGB, BC4)]

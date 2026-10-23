@@ -31,6 +31,9 @@ Durante o jogo
 - Teclado e mouse: no launcher, botão "Controles" (ou no menu do jogo, aba Controls), ligue
   "Olhar com o mouse". O mouse gira a câmera nos três jogos; segure Alt esquerdo para soltar
   o cursor. Lá também dá para trocar teclas e ajustar a sensibilidade.
+- Ícones no jogo: na janela "Controles", escolha Controle PlayStation (padrão), Controle Xbox
+  (botões do jogo com A, B, X, Y) ou Teclado e mouse (as suas teclas). Depois de trocar ou de mudar
+  teclas, feche o jogo e abra de novo pelo launcher.
 - O botão "Opções" do launcher ajusta tela (janela, sem borda, tela cheia), VSync, limite de
   FPS e contador de FPS. Em "Avançado" dá para desligar otimizações; "Restaurar padrão" volta
   à configuração testada.
@@ -48,6 +51,8 @@ Problemas
 - UC2 em 4K (talvez 1440p): texturas do cenário podem piscar. Ainda sem correção.
 - UC1: se aparecer "UC1 binding retry" no log, mande o user\last_run.log (proteção de um
   travamento visto num PC, em teste).
+- UC1: a câmera no mouse ao andar ainda é inconsistente (às vezes para de seguir
+  o mouse por um instante). A mira está boa.
 - O jogo não abre ou fecha sozinho: clique em "Log" no launcher e, ao relatar, envie
   o arquivo user\last_run.log.
 
@@ -80,12 +85,15 @@ lets you turn optimizations off ("Restore defaults" brings back the tested setup
 The launcher tells you when a new version is out (can be turned off in Options).
 Keyboard and mouse: the launcher's Controls button (or the Controls tab in the in-game menu);
 turn on mouse look to turn the camera with the mouse in all three games (hold Left Alt to free
-the cursor), and change keys and sensitivity there.
+the cursor), and change keys and sensitivity there. "Icons in the game" (Controls): PlayStation
+controller (default), Xbox controller (the game's buttons with A, B, X, Y) or Keyboard and mouse (your keys); after
+changing it or the keys, close the game and start it again from the launcher.
 In game, Insert or F1 (or L2 + R2 + L3 + R3) opens the port menu. Saves, shader cache and the log are in
 user\. When reporting a problem, send user\last_run.log.
 UC2 train prologue: you may need to jump earlier than on PS4; if the carriage still falls, turn
 off UC_HLE_INORDER and UC_ACB_DISPATCH_PIPE in Options > Advanced for that part. UC3: rare
 driver timeout crash after long sessions, so save often. UC2 in 4K (maybe 1440p): scenery textures
 can flicker, not fixed yet. UC1: if "UC1 binding retry" shows up in the log, please send
-user\last_run.log (protection for a crash seen on one PC, being tested).
+user\last_run.log (protection for a crash seen on one PC, being tested). UC1: the mouse camera while walking
+is still inconsistent (at times it stops following the mouse for a moment); aiming is fine.
 Source code and credits: https://github.com/zorde23/Uncharted_Collection_PC

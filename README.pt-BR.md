@@ -38,6 +38,12 @@ WASD anda, Espaço X, Ctrl esquerdo ou Q Círculo, F Quadrado, E Triângulo, G L
 do mouse L2 (mirar), botão esquerdo R2 (atirar), V L3, botão do meio R3, 1/2/3/4 ou a roda o
 direcional, Tab o touchpad, Esc ou Enter Options.
 
+**Ícones no jogo:** na janela **Controles**, escolha quais botões aparecem nos textos e no HUD:
+*Controle PlayStation* (os do próprio jogo, o padrão), *Controle Xbox* (os botões do jogo com A, B,
+X, Y, LB/RB, LT/RT, View, Menu, feitos no seu PC a partir dos arquivos do seu jogo) ou *Teclado e mouse* (as teclas que você configurou). A escolha só
+vale ao abrir o jogo: depois de trocar, ou de mudar as teclas, feche o jogo e abra de novo pelo
+launcher. Na primeira vez em cada jogo o launcher leva alguns segundos para preparar os ícones.
+
 Precisa de Windows 10 (1903+) ou 11, 64 bits, e placa de vídeo com Vulkan 1.3. O port foi feito numa
 AMD RX 6750 XT; placas Intel têm uma correção do Supermedo, mas ainda não foram testadas.
 
@@ -73,7 +79,7 @@ Atualizado em 23/10/2026.
 | Uncharted 3 | `big3-ps4_Shipping.elf` | **100% jogável do início ao fim**, a **60 FPS em 1080p, sem upscaling nem geração de quadros**. Algumas partes ainda precisam de otimização e caem abaixo de 60 (perto de 50 com muita vegetação, no Castelo), sempre acima de 30 FPS. Um único travamento no jogo inteiro, ainda não reproduzido nem corrigido. Problemas conhecidos listados abaixo |
 
 Novo na 0.3.5:
-- **Ícones de teclado** nos três jogos: com "Ícones de teclado no jogo" ligado na janela Controles do launcher, os botões mostrados nos textos e no HUD aparecem com as suas teclas em vez dos botões do controle.
+- **Ícones de teclado ou de Xbox** nos três jogos: na janela Controles do launcher, "Ícones no jogo" troca os botões mostrados nos textos e no HUD dos de PlayStation pelas suas teclas ou por botões de Xbox no estilo do próprio jogo.
 - UC3: as manchas vermelhas redondas que alguns jogadores viam (bloom, em todas as placas) foram corrigidas.
 - UC1 e UC2 agora usam as correções do UC3 para sombras, luzes, imagem e a névoa dos cones de luz.
 - UC1: proteção contra um travamento visto num PC (o jogo não fecha mais ali; em teste).
@@ -112,7 +118,8 @@ Problemas conhecidos:
 - Pouco testado. Avise se faltar algum som ou aparecer algum defeito.
 
 **Uncharted 1**
-- **Um travamento visto num PC** (duas vezes, no mesmo ponto do código do jogo). Na 0.3.5 o jogo espera um instante e continua em vez de fechar; no pior caso um objeto pode sair errado por um quadro. Se aparecer "UC1 binding retry" no `last_run.log`, mande o log.
+- **Um travamento visto num PC com Intel Core i5-14600K + NVIDIA RTX 3070** (duas vezes, no mesmo ponto do código do jogo). Nunca aconteceu no PC de desenvolvimento (AMD Ryzen 7 5700X + Radeon RX 6750 XT). Na 0.3.5 o jogo espera um instante e continua em vez de fechar; no pior caso um objeto pode sair errado por um quadro. Se aparecer "UC1 binding retry" no `last_run.log`, mande o log.
+- **Câmera no mouse ainda inconsistente ao andar**: às vezes a câmera para de seguir o mouse por um instante (cerca de 0,1 s) e depois volta ao normal. A mira com o mouse está boa. Ainda não corrigido.
 - Pouco testado. Avise se faltar algum som ou aparecer algum defeito.
 
 O diário do projeto, com o que foi feito e por quê, está em [docs/uc3/DEVLOG.md](docs/uc3/DEVLOG.md).

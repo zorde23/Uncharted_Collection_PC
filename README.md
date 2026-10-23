@@ -39,6 +39,13 @@ cursor. Default keys: WASD move, Space Cross, Left Ctrl or Q Circle, F Square, E
 R R1, right mouse button L2 (aim), left mouse button R2 (shoot), V L3, middle mouse button R3,
 1/2/3/4 or the wheel the d-pad, Tab the touchpad, Esc or Enter Options.
 
+**Icons in the game:** in the **Controls** window, choose which buttons the game's text and HUD
+show: *PlayStation controller* (the game's own, the default), *Xbox controller* (the game's buttons
+with A, B, X, Y, LB/RB, LT/RT, View, Menu, made on your PC from your game files) or *Keyboard and mouse* (the keys you set). The choice only
+applies when the game starts: after changing it, or changing keys, close the game and start it
+again from the launcher. The first time in each game the launcher takes a few seconds to prepare
+the icons.
+
 You need 64-bit Windows 10 (1903+) or 11 and a GPU with Vulkan 1.3. The port was developed on an
 AMD RX 6750 XT; Intel GPUs get a fix from Supermedo but are still untested.
 
@@ -74,7 +81,7 @@ Updated 2026-10-23.
 | Uncharted 3 | `big3-ps4_Shipping.elf` | **100% playable from start to end**, at **60 FPS in 1080p, with no upscaling or frame generation**. Some parts still need optimization and drop below 60 (around 50 in heavy vegetation, the Chateau), always staying above 30 FPS. One crash in the whole playthrough, not reproduced or fixed yet. Known issues listed below |
 
 New in 0.3.5:
-- **Keyboard icons** in all three games: with "Keyboard icons in the game" on in the launcher's Controls window, the button prompts in texts and in the HUD show your keys instead of the controller buttons.
+- **Keyboard or Xbox icons** in all three games: in the launcher's Controls window, "Icons in the game" switches the button prompts in texts and in the HUD from the PlayStation buttons to your keys or to Xbox buttons in the game's own style.
 - UC3: the soft red round spots some players saw (bloom, on every GPU) are fixed.
 - UC1 and UC2 now use the UC3 fixes for shadows, lights, the image and the light cone fog.
 - UC1: protection against a crash seen on one PC (the game no longer closes there; being tested).
@@ -112,7 +119,8 @@ Known issues:
 - Lightly tested. Please report missing sounds or visual bugs.
 
 **Uncharted 1**
-- **A crash seen on one PC** (two times, same spot in the game code). In 0.3.5 the game waits a moment and goes on instead of closing; at worst one object can look wrong for one frame. If you see "UC1 binding retry" in `last_run.log`, please send the log.
+- **A crash seen on one PC with an Intel Core i5-14600K + NVIDIA RTX 3070** (two times, same spot in the game code). It never happened on the development PC (AMD Ryzen 7 5700X + Radeon RX 6750 XT). In 0.3.5 the game waits a moment and goes on instead of closing; at worst one object can look wrong for one frame. If you see "UC1 binding retry" in `last_run.log`, please send the log.
+- **Mouse camera still inconsistent while walking**: at times the camera stops following the mouse for a moment (about 0.1 s) and then goes back to normal. Aiming with the mouse is fine. Not fixed yet.
 - Lightly tested. Please report missing sounds or visual bugs.
 
 The project log (in Portuguese), with what was done and why, is in
