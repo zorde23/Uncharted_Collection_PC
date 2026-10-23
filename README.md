@@ -63,13 +63,19 @@ Uncharted 1 came later almost for free, and the goal is now the whole trilogy.
 
 ## Status
 
-Updated 2026-10-20.
+Updated 2026-10-23.
 
 | Game | Executable | Status |
 |---|---|---|
 | Uncharted 1 | `eboot.bin` | Runs at **60 FPS** with sound (gunshots included); lightly tested past the start |
 | Uncharted 2 | `big2-ps4_Shipping.elf` | Playable, 51–60 FPS, with its own saves |
 | Uncharted 3 | `big3-ps4_Shipping.elf` | **100% playable from start to end**, at **60 FPS in 1080p, with no upscaling or frame generation**. Some parts still need optimization and drop below 60 (around 50 in heavy vegetation, the Chateau), always staying above 30 FPS. One crash in the whole playthrough, not reproduced or fixed yet. Known issues listed below |
+
+New in 0.3.5:
+- **Keyboard icons** in all three games: with "Keyboard icons in the game" on in the launcher's Controls window, the button prompts in texts and in the HUD show your keys instead of the controller buttons.
+- UC3: the soft red round spots some players saw (bloom, on every GPU) are fixed.
+- UC1 and UC2 now use the UC3 fixes for shadows, lights, the image and the light cone fog.
+- UC1: protection against a crash seen on one PC (the game no longer closes there; being tested).
 
 New in 0.3.4:
 - **1440p and 4K** in all three games (launcher, Options > Resolution). The games render natively at the chosen size (no upscaling), and the intro videos are scaled to fill the screen. **Not fully tested yet**: tried in short sessions of each game, not through a whole game. Above 1080p the GPU works harder and the game uses more video memory (4K: about 8 GB of game memory). On a 4K monitor, "Borderless" fills the screen with the same FPS as a window.
@@ -99,10 +105,12 @@ Known issues:
 - **1440p and 4K are not fully tested yet** (all three games): only short sessions so far. If a game crashes or looks wrong above 1080p, go back to 1920x1080 in Options and please report it.
 
 **Uncharted 2**
+- **Scenery textures can flicker in 4K** (and possibly 1440p). Not seen in 1080p so far. Not fixed yet.
 - In the train prologue the carriage can fall too early, so you may need to jump sooner than on PS4. UC2 runs without `UC_COMPUTE_PIPE` for this reason. If the train still fails, turn off `UC_HLE_INORDER` and `UC_ACB_DISPATCH_PIPE` in the launcher (Options > Advanced) for that part; they keep the rooftop chase at 60 FPS.
 - Lightly tested. Please report missing sounds or visual bugs.
 
 **Uncharted 1**
+- **A crash seen on one PC** (two times, same spot in the game code). In 0.3.5 the game waits a moment and goes on instead of closing; at worst one object can look wrong for one frame. If you see "UC1 binding retry" in `last_run.log`, please send the log.
 - Lightly tested. Please report missing sounds or visual bugs.
 
 The project log (in Portuguese), with what was done and why, is in

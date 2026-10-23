@@ -62,13 +62,19 @@ vieram depois quase de graça, e agora o objetivo é a trilogia inteira.
 
 ## Situação
 
-Atualizado em 20/10/2026.
+Atualizado em 23/10/2026.
 
 | Jogo | Executável | Situação |
 |---|---|---|
 | Uncharted 1 | `eboot.bin` | Roda a **60 FPS**, com som (inclusive os tiros); pouco testado além do começo |
 | Uncharted 2 | `big2-ps4_Shipping.elf` | Jogável, 51–60 FPS, com saves próprios |
 | Uncharted 3 | `big3-ps4_Shipping.elf` | **100% jogável do início ao fim**, a **60 FPS em 1080p, sem upscaling nem geração de quadros**. Algumas partes ainda precisam de otimização e caem abaixo de 60 (perto de 50 com muita vegetação, no Castelo), sempre acima de 30 FPS. Um único travamento no jogo inteiro, ainda não reproduzido nem corrigido. Problemas conhecidos listados abaixo |
+
+Novo na 0.3.5:
+- **Ícones de teclado** nos três jogos: com "Ícones de teclado no jogo" ligado na janela Controles do launcher, os botões mostrados nos textos e no HUD aparecem com as suas teclas em vez dos botões do controle.
+- UC3: as manchas vermelhas redondas que alguns jogadores viam (bloom, em todas as placas) foram corrigidas.
+- UC1 e UC2 agora usam as correções do UC3 para sombras, luzes, imagem e a névoa dos cones de luz.
+- UC1: proteção contra um travamento visto num PC (o jogo não fecha mais ali; em teste).
 
 Novo na 0.3.4:
 - **1440p e 4K** nos três jogos (launcher, Opções > Resolução). O jogo renderiza nativo no tamanho escolhido (sem upscaling), e os vídeos de abertura são ampliados para a tela. **Ainda não testado por completo**: foi testado em sessões curtas de cada jogo, não num jogo inteiro. Acima de 1080p a placa de vídeo trabalha mais e o jogo usa mais memória de vídeo (4K: cerca de 8 GB de memória do jogo). Em monitor 4K, "Janela sem borda" preenche a tela com o mesmo FPS da janela.
@@ -99,10 +105,12 @@ Problemas conhecidos:
 - **1440p e 4K ainda não foram testados por completo** (nos três jogos): só sessões curtas até agora. Se o jogo travar ou aparecer algo errado acima de 1080p, volte para 1920x1080 nas Opções e avise.
 
 **Uncharted 2**
+- **Texturas do cenário podem piscar em 4K** (e talvez em 1440p). Em 1080p não foi visto até agora. Ainda sem correção.
 - No prólogo do trem o vagão pode cair cedo demais, então talvez seja preciso pular antes do que no PS4. Por isso o UC2 roda sem `UC_COMPUTE_PIPE`. Se o trem continuar falhando, desligue `UC_HLE_INORDER` e `UC_ACB_DISPATCH_PIPE` no launcher (Opções > Avançado) nessa parte; elas deixam a perseguição nos telhados a 60 FPS.
 - Pouco testado. Avise se faltar algum som ou aparecer algum defeito.
 
 **Uncharted 1**
+- **Um travamento visto num PC** (duas vezes, no mesmo ponto do código do jogo). Na 0.3.5 o jogo espera um instante e continua em vez de fechar; no pior caso um objeto pode sair errado por um quadro. Se aparecer "UC1 binding retry" no `last_run.log`, mande o log.
 - Pouco testado. Avise se faltar algum som ou aparecer algum defeito.
 
 O diário do projeto, com o que foi feito e por quê, está em [docs/uc3/DEVLOG.md](docs/uc3/DEVLOG.md).

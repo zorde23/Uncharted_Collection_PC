@@ -1,4 +1,4 @@
-Uncharted: The Nathan Drake Collection para PC (ucndc_pc) v0.3.5-beta8
+Uncharted: The Nathan Drake Collection para PC (ucndc_pc) v0.3.5
 ================================================================
 [English below]
 
@@ -45,6 +45,9 @@ Problemas
 - UC2, prólogo do trem: talvez seja preciso pular antes do que no PS4. Se o vagão continuar
   caindo, desligue UC_HLE_INORDER e UC_ACB_DISPATCH_PIPE em Opções > Avançado nessa parte.
 - UC3: travamento raro depois de sessões longas (timeout do driver de vídeo). Salve com frequência.
+- UC2 em 4K (talvez 1440p): texturas do cenário podem piscar. Ainda sem correção.
+- UC1: se aparecer "UC1 binding retry" no log, mande o user\last_run.log (proteção de um
+  travamento visto num PC, em teste).
 - O jogo não abre ou fecha sozinho: clique em "Log" no launcher e, ao relatar, envie
   o arquivo user\last_run.log.
 
@@ -82,5 +85,7 @@ In game, Insert or F1 (or L2 + R2 + L3 + R3) opens the port menu. Saves, shader 
 user\. When reporting a problem, send user\last_run.log.
 UC2 train prologue: you may need to jump earlier than on PS4; if the carriage still falls, turn
 off UC_HLE_INORDER and UC_ACB_DISPATCH_PIPE in Options > Advanced for that part. UC3: rare
-driver timeout crash after long sessions, so save often.
+driver timeout crash after long sessions, so save often. UC2 in 4K (maybe 1440p): scenery textures
+can flicker, not fixed yet. UC1: if "UC1 binding retry" shows up in the log, please send
+user\last_run.log (protection for a crash seen on one PC, being tested).
 Source code and credits: https://github.com/zorde23/Uncharted_Collection_PC
