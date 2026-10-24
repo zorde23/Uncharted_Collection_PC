@@ -6,7 +6,7 @@ Runs the games of **Uncharted: The Nathan Drake Collection** (PS4, Bluepoint, 20
 and 11. It is not a source port and not a classic emulator: the original PS4 executable runs
 directly on the PC's CPU, on top of a compatibility layer that replaces the PS4 system and
 translates its graphics to Vulkan (see [How it works](#how-it-works)). The focus is **Uncharted 3: Drake's Deception**, playable from start to end at 60 FPS in 1080p with no upscaling or frame generation;
-Uncharted 2 and Uncharted 1 are playable.
+Uncharted 2 and Uncharted 1 are playable, still with some crashes.
 
 > **No game files are included.** You need a dump from your own PS4
 > (tested: **CUSA02344**, version 01.00 with the **01.02** update).
@@ -76,8 +76,8 @@ Updated 2026-10-23.
 
 | Game | Executable | Status |
 |---|---|---|
-| Uncharted 1 | `eboot.bin` | Runs at **60 FPS** with sound (gunshots included); lightly tested past the start |
-| Uncharted 2 | `big2-ps4_Shipping.elf` | Playable, 51–60 FPS, with its own saves |
+| Uncharted 1 | `eboot.bin` | **Playable**, at **60 FPS** with sound (gunshots included); still has some crashes |
+| Uncharted 2 | `big2-ps4_Shipping.elf` | **Playable**, 51–60 FPS, with its own saves; still has some crashes |
 | Uncharted 3 | `big3-ps4_Shipping.elf` | **100% playable from start to end**, at **60 FPS in 1080p, with no upscaling or frame generation**. Some parts still need optimization and drop below 60 (around 50 in heavy vegetation, the Chateau), always staying above 30 FPS. One crash in the whole playthrough, not reproduced or fixed yet. Known issues listed below |
 
 New in 0.3.6:

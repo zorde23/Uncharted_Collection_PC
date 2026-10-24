@@ -21,8 +21,8 @@ Como jogar
    enquanto os shaders são criados; depois fica liso.
 
 Situação
-- Uncharted 1: jogável.
-- Uncharted 2: jogável.
+- Uncharted 1: jogável, ainda com alguns travamentos.
+- Uncharted 2: jogável, ainda com alguns travamentos.
 - Uncharted 3: jogável, 60 FPS em 1080p, sem upscaling nem geração de quadros
   (perto de 50 FPS em áreas com muita vegetação, como o Castelo).
 
@@ -76,7 +76,7 @@ How to play
 
 Status: Uncharted 3 plays at 60 FPS in 1080p with no upscaling or frame generation (around
 50 FPS in heavy vegetation such as the Chateau);
-Uncharted 2 and Uncharted 1 are playable.
+Uncharted 2 and Uncharted 1 are playable, still with some crashes.
 
 The launcher's Options button sets display mode, VSync, FPS limit and the FPS counter; Advanced
 lets you turn optimizations off ("Restore defaults" brings back the tested setup).
