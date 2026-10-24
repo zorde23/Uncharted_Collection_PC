@@ -81,7 +81,7 @@ Atualizado em 23/10/2026.
 Novo na 0.3.6:
 - **FPS de volta**: a 0.3.4 e a 0.3.5 perdiam cerca de 20% de FPS nas cenas pesadas (por exemplo a Cidadela no UC3). Corrigido.
 - UC1: **câmera no mouse corrigida** ao andar, na escada, mirando, em cobertura, na torreta do carro, no jet ski e nas metralhadoras fixas.
-- Correção para travamentos em processadores Intel de 12ª geração ou mais novos (ligada para todos; testada só no UC1 de um jogador).
+- Correção para travamentos em processadores Intel de 12ª geração ou mais novos, do d4rksp4rt4n (ligada para todos; testada só no UC1 de um jogador).
 - Opções > Avançado, Experimental: "2 threads de preparo", que pode ajudar CPUs de 4 e 6 núcleos (no PC de desenvolvimento ficou empatado).
 
 Novo na 0.3.5:
@@ -124,7 +124,6 @@ Problemas conhecidos:
 - Pouco testado. Avise se faltar algum som ou aparecer algum defeito.
 
 **Uncharted 1**
-- **Um travamento visto num PC com Intel Core i5-14600K + NVIDIA RTX 3070** (duas vezes, no mesmo ponto do código do jogo). Nunca aconteceu no PC de desenvolvimento (AMD Ryzen 7 5700X + Radeon RX 6750 XT). Na 0.3.5 o jogo espera um instante e continua em vez de fechar; no pior caso um objeto pode sair errado por um quadro. Se aparecer "UC1 binding retry" no `last_run.log`, mande o log.
 - Pouco testado. Avise se faltar algum som ou aparecer algum defeito.
 
 O diário do projeto, com o que foi feito e por quê, está em [docs/uc3/DEVLOG.md](docs/uc3/DEVLOG.md).
@@ -235,6 +234,9 @@ A lista completa, com medições, está no [DEVLOG](docs/uc3/DEVLOG.md).
   e o [uncharted_pc](https://github.com/Supermedo/uncharted_pc), de onde vieram ideias e correções
   (HLE da cópia escalar de constantes, `BUFFER_LOAD` com addr64, regras de fim de job do Ajm, patch de espera do
   `m_gfxEopTick` da 0.3.2, abertura com `O_CREAT` em pasta somente leitura para o som do UC1, correção para placas Intel da 0.3.3).
+- **d4rksp4rt4n**: achou a causa dos travamentos em processadores Intel de 12ª geração ou mais novos (o Windows
+  apaga a red zone das funções do jogo) e fez a correção, a [PR #403 do uncharted_pc](https://github.com/Supermedo/uncharted_pc/pull/403), vinda do port do
+  Bloodborne e com a mesma ideia da [proteção do shadPS4](https://github.com/shadps4-emu/shadPS4/pull/4802). Passada aqui na [issue #4](https://github.com/zorde23/Uncharted_Collection_PC/issues/4).
 - **Felipe Prado** e colaboradores: [gow3_pc](https://github.com/FelipePrado0/gow3_pc), o port do
   God of War III do qual este repositório é fork, com as correções de renderização do
   [cuesta4](https://github.com/cuesta4/shadPS4/tree/eltutz).

@@ -49,8 +49,6 @@ Problemas
   caindo, desligue UC_HLE_INORDER e UC_ACB_DISPATCH_PIPE em Opções > Avançado nessa parte.
 - UC3: travamento raro depois de sessões longas (timeout do driver de vídeo). Salve com frequência.
 - UC2 em 4K (talvez 1440p): texturas do cenário podem piscar. Ainda sem correção.
-- UC1: se aparecer "UC1 binding retry" no log, mande o user\last_run.log (proteção de um
-  travamento visto num PC, em teste).
 - O jogo não abre ou fecha sozinho: clique em "Log" no launcher e, ao relatar, envie
   o arquivo user\last_run.log.
 
@@ -91,6 +89,5 @@ user\. When reporting a problem, send user\last_run.log.
 UC2 train prologue: you may need to jump earlier than on PS4; if the carriage still falls, turn
 off UC_HLE_INORDER and UC_ACB_DISPATCH_PIPE in Options > Advanced for that part. UC3: rare
 driver timeout crash after long sessions, so save often. UC2 in 4K (maybe 1440p): scenery textures
-can flicker, not fixed yet. UC1: if "UC1 binding retry" shows up in the log, please send
-user\last_run.log (protection for a crash seen on one PC, being tested).
+can flicker, not fixed yet.
 Source code and credits: https://github.com/zorde23/Uncharted_Collection_PC

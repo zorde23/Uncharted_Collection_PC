@@ -83,7 +83,7 @@ Updated 2026-10-23.
 New in 0.3.6:
 - **FPS is back**: 0.3.4 and 0.3.5 lost about 20% FPS in heavy scenes (for example the Citadel in UC3). Fixed.
 - UC1: **mouse camera fixed** while walking, on stairs, aiming, in cover, on the car turret, on the jet ski and on mounted guns.
-- Fix for crashes on Intel 12th gen and newer CPUs (on for everyone; only tested in one player's UC1).
+- Fix for crashes on Intel 12th gen and newer CPUs, from d4rksp4rt4n (on for everyone; only tested in one player's UC1).
 - Options > Advanced, Experimental: "2 preparation threads", may help 4 and 6 core CPUs (a tie on the development PC).
 
 New in 0.3.5:
@@ -125,7 +125,6 @@ Known issues:
 - Lightly tested. Please report missing sounds or visual bugs.
 
 **Uncharted 1**
-- **A crash seen on one PC with an Intel Core i5-14600K + NVIDIA RTX 3070** (two times, same spot in the game code). It never happened on the development PC (AMD Ryzen 7 5700X + Radeon RX 6750 XT). In 0.3.5 the game waits a moment and goes on instead of closing; at worst one object can look wrong for one frame. If you see "UC1 binding retry" in `last_run.log`, please send the log.
 - Lightly tested. Please report missing sounds or visual bugs.
 
 The project log (in Portuguese), with what was done and why, is in
@@ -237,6 +236,9 @@ The full list, with measurements, is in the [DEVLOG](docs/uc3/DEVLOG.md).
 - **Supermedo** (Mohammed Albarghouthi): the [Bloodborne Windows port](https://github.com/Supermedo/bloodborne_pc)
   and [uncharted_pc](https://github.com/Supermedo/uncharted_pc), the source of ideas and fixes used
   here (scalar constant copy HLE, addr64 `BUFFER_LOAD`, Ajm end-of-job rules, the `m_gfxEopTick` wait patch from 0.3.2, read-only `O_CREAT` open for Uncharted 1 sound, the Intel GPU fix from 0.3.3).
+- **d4rksp4rt4n**: found the cause of the crashes on Intel 12th gen and newer CPUs (Windows overwrites the
+  red zone of the game's functions) and wrote the fix, [uncharted_pc PR #403](https://github.com/Supermedo/uncharted_pc/pull/403), from the
+  Bloodborne port and the same idea as [shadPS4's protection](https://github.com/shadps4-emu/shadPS4/pull/4802). Shared here in [issue #4](https://github.com/zorde23/Uncharted_Collection_PC/issues/4).
 - **Felipe Prado** and contributors: [gow3_pc](https://github.com/FelipePrado0/gow3_pc), the God of
   War III port this repository is a fork of, with the rendering fixes by
   [cuesta4](https://github.com/cuesta4/shadPS4/tree/eltutz).
