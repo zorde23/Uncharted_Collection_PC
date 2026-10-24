@@ -39,7 +39,7 @@ LOG_FILE = USER_DIR / 'last_run.log'
 INPUT_FILE = DATA_DIR / 'input.ini'
 APP_NAME = 'Uncharted Collection PC'
 EXE_NAME = 'Uncharted Launcher.exe'
-VERSION = '0.3.5'
+VERSION = '0.3.6-beta2'
 RELEASES_API = 'https://api.github.com/repos/zorde23/Uncharted_Collection_PC/releases/latest'
 RELEASES_PAGE = 'https://github.com/zorde23/Uncharted_Collection_PC/releases/latest'
 NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
@@ -54,6 +54,9 @@ COMMON = {
     'GOW3_READBACK_FAST': '1', 'GOW3_READBACK_FAST_WAIT': '1', 'GOW3_READBACK_FAST_SIDEQ': '1',
     # Bloom mips keep their place when another image shares their memory (red spots, 2026-10-22).
     'GOW3_OVERLAP_KEEP_VIEW': '1',
+    # Guest stores of red-zone leaf functions run 128 bytes below rsp, so a fault's frame does not
+    # overwrite their locals (crashes on Intel 12th gen and later, UC1 0x64011d / UC3 0x12d83fe).
+    'GOW3_RED_ZONE': '1',
 }
 # key, title, executable, (status pt, status en), extra options
 GAMES = [
@@ -148,7 +151,8 @@ FPS_LIMITS = [('0', ('Sem limite (60)', 'No limit (60)')), ('30', ('30', '30')),
 # keeps the scenery; FRAME_STATS, FAULT_WRITES, MOUSE_CAMERA_LOG and CB_WATCH are only log aids; HLE_INVALIDATE follows SCALAR_COPY_HLE (texture swaps).
 FIXED = {'GOW3_READBACKS', 'GOW3_FRAME_STATS', 'GOW3_LOW_IMAGE', 'GOW3_AJM_END_RULES', 'GOW3_EOP_TICK_WAIT',
          'GOW3_HLE_INVALIDATE', 'GOW3_FAULT_WRITES',
-         'GOW3_MOUSE_CAMERA_LOG', 'GOW3_CB_WATCH', 'GOW3_OVERLAP_KEEP_VIEW', 'GOW3_UC1_BIND_RETRY'}
+         'GOW3_MOUSE_CAMERA_LOG', 'GOW3_CB_WATCH', 'GOW3_OVERLAP_KEEP_VIEW', 'GOW3_UC1_BIND_RETRY',
+         'GOW3_RED_ZONE'}
 
 # Controls window (input.ini, read by the game: src/runtime_pad.c), ported from SuperMedo's launcher
 # (uncharted_pc, GPL). Actions with their PS4 names, the default keys ("A|B": two bindings) and the
@@ -521,6 +525,9 @@ def game_environment(settings, key):
         env['GOW3_ICON_FILES'] = ';'.join(made)
     if errors:
         env['GOW3_ICON_ERROR'] = '; '.join(errors)  # printed by the game in the log
+    for name, value in os.environ.items():
+        if name.startswith('UC_TEST_'):
+            env['GOW3_' + name[8:]] = value  # test .bat files: UC_TEST_X=v forces GOW3_X over the launcher's choice
     return env
 
 
