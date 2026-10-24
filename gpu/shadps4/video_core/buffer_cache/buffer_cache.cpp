@@ -6,16 +6,21 @@
 #include <array>
 #include <atomic>
 #include <map>
+#include <mutex>
 #include <unordered_map>
 #include <algorithm>
 #include <bit>
 #include <cstdlib>
 #include <thread>
+#include <cstdio>
+#include <string>
+#include <vector>
 #include <magic_enum/magic_enum.hpp>
 #include "gow3_copy.h"
 #include "gow3_toggles.h"
 #include "gow3_write_log.h"
 #include "common/alignment.h"
+#include "common/thread.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
 #include "core/memory.h"
@@ -363,6 +368,10 @@ std::array<std::atomic<u64>, 64> diag_fault_windows{}; // window index + 1
 std::atomic<u32> diag_fault_window_next{0};
 std::array<std::atomic<u64>, 65536> diag_page_key{};  // page index + 1
 std::array<std::atomic<u64>, 65536> diag_page_tick{};
+// Fable R.14 D0 (5): who last wrote a page / window (Gow3Stats::diag_writer at the binding).
+std::array<std::atomic<u64>, 65536> diag_page_writer{};
+std::array<std::atomic<u64>, 4096> diag_window_key{}; // window + 1
+std::array<std::atomic<u64>, 4096> diag_window_writer{};
 bool DiagWindowFaulted(VAddr window) {
     for (const auto& slot : diag_fault_windows) {
         if (slot.load(std::memory_order_relaxed) == window + 1) {
@@ -390,6 +399,68 @@ struct DiagTotals {
     std::atomic<u64> cp_ns[4]{};
     std::atomic<u64> land_ns[4]{};
 } diag_totals;
+// Fable R.14 (c): which game threads fault, by name (first 32 threads that fault).
+struct DiagThread {
+    std::atomic<bool> used{false};
+    char name[48]{};
+    std::atomic<u64> count{0};
+    std::atomic<u64> ns{0};
+};
+std::array<DiagThread, 32> diag_threads{};
+std::atomic<u32> diag_thread_next{0};
+DiagThread* DiagThisThread() {
+    thread_local DiagThread* self = [] () -> DiagThread* {
+        const u32 index = diag_thread_next.fetch_add(1, std::memory_order_relaxed);
+        if (index >= diag_threads.size()) {
+            return nullptr;
+        }
+        auto& slot = diag_threads[index];
+        const std::string name = Common::GetCurrentThreadName();
+        std::snprintf(slot.name, sizeof(slot.name), "%s#%u", name.empty() ? "?" : name.c_str(),
+                      index);
+        slot.used.store(true, std::memory_order_release);
+        return &slot;
+    }();
+    return self;
+}
+// Fable R.14 D0 (5): faults of the GfxEop handler (0) and NdJobWorkerThread 0 (1): last writer
+// of the faulted page (window when the page is untracked), and a few addresses per window.
+int DiagWatchedThread() {
+    thread_local const int kind = [] {
+        const std::string name = Common::GetCurrentThreadName();
+        return name.starts_with("GPU Interrupts") ? 0 : name == "NdJobWorkerThread 0" ? 1 : -1;
+    }();
+    return kind;
+}
+struct DiagWriterRow {
+    u64 count = 0;
+    u64 ns = 0;
+};
+std::mutex diag_writer_mutex;
+std::map<u64, DiagWriterRow> diag_writers[2];
+struct DiagSample {
+    VAddr addr;
+    u64 size;
+    int category;
+    u64 writer;
+    bool from_page;
+    std::string info;
+};
+std::vector<DiagSample> diag_samples[2];
+u64 DiagWriterOf(VAddr addr, bool& from_page) {
+    const VAddr page = addr >> DiagPageShift;
+    const size_t index = page % diag_page_key.size();
+    if (diag_page_key[index].load(std::memory_order_relaxed) == page + 1) {
+        from_page = true;
+        return diag_page_writer[index].load(std::memory_order_relaxed);
+    }
+    from_page = false;
+    const VAddr window = addr >> 19; // WriteTickShift (512 KiB windows)
+    const size_t w = window % diag_window_key.size();
+    return diag_window_key[w].load(std::memory_order_relaxed) == window + 1
+               ? diag_window_writer[w].load(std::memory_order_relaxed)
+               : 0;
+}
 } // namespace
 
 void BufferCache::NoteGpuWrite(VAddr device_addr, u64 size) {
@@ -405,6 +476,13 @@ void BufferCache::NoteGpuWrite(VAddr device_addr, u64 size) {
         auto& slot = write_ticks[window % write_ticks.size()];
         slot.window.store(window, std::memory_order_relaxed);
         slot.tick.store(tick, std::memory_order_relaxed);
+        if (FaultCategoryDiag()) {
+            const u64 writer = Gow3Stats::diag_writer.load(std::memory_order_relaxed);
+            diag_window_key[window % diag_window_key.size()].store(window + 1,
+                                                                    std::memory_order_relaxed);
+            diag_window_writer[window % diag_window_key.size()].store(writer,
+                                                                       std::memory_order_relaxed);
+        }
         if (FaultCategoryDiag() && DiagWindowFaulted(window)) {
             const VAddr begin = std::max<VAddr>(device_addr, window << WriteTickShift);
             const VAddr end = std::min<VAddr>(device_addr + size, (window + 1) << WriteTickShift);
@@ -412,6 +490,8 @@ void BufferCache::NoteGpuWrite(VAddr device_addr, u64 size) {
                 const size_t index = page % diag_page_key.size();
                 diag_page_key[index].store(page + 1, std::memory_order_relaxed);
                 diag_page_tick[index].store(tick, std::memory_order_relaxed);
+                diag_page_writer[index].store(Gow3Stats::diag_writer.load(std::memory_order_relaxed),
+                                              std::memory_order_relaxed);
             }
         }
     }
@@ -670,9 +750,33 @@ std::unique_lock<std::recursive_mutex> BufferCache::RangesLock() {
     return std::unique_lock{ranges_mutex};
 }
 
+// uc3 (Fable R.14 D4 diagnostics): why FastDoneReadback refused (1 not ready, 2 no side
+// queue, 3 ReadbackAll or Hot, 4 arena mismatch, 5 window over a slot, 6 no free slot,
+// 7 overlaps a pending readback, 8 nothing or too much to copy, 9 side queue copy failed,
+// 10 served; 0 not tried).
+thread_local int fast_reason = 0;
+
+std::string BufferCache::DescribeGpuRanges(VAddr addr, u64 size) {
+    std::string out;
+    int n = 0;
+    const auto ranges_lock = RangesLock();
+    gpu_modified_ranges.ForEachInRange(addr, size, [&](VAddr start, VAddr end) {
+        if (n++ < 6) {
+            out += fmt::format(" [{:x}, +{})", start, end - start);
+        }
+    });
+    if (n > 6) {
+        out += fmt::format(" (+{} more)", n - 6);
+    }
+    return out.empty() ? " none" : out;
+}
+
 bool BufferCache::FastDoneReadback(VAddr device_addr, u64 size, bool is_write) {
     if (!fast_ready.load(std::memory_order_acquire) || !instance.GetSideQueue() ||
         ReadbackAll() || ReadbackHot()) {
+        fast_reason = !fast_ready.load(std::memory_order_acquire) ? 1
+                      : !instance.GetSideQueue()                  ? 2
+                                                                  : 3;
         return false;
     }
     constexpr u64 WindowSize = 512_KB;
@@ -682,6 +786,7 @@ bool BufferCache::FastDoneReadback(VAddr device_addr, u64 size, bool is_write) {
     const u64 last_page = last_block >> blocks_per_arena_page_shift;
     const Buffer* arena = address_space[first_page];
     if (!arena || address_space[last_page] != arena) {
+        fast_reason = 4;
         return false;
     }
     const VAddr arena_end = arena->cpu_addr + arena->size_bytes;
@@ -690,12 +795,14 @@ bool BufferCache::FastDoneReadback(VAddr device_addr, u64 size, bool is_write) {
     const VAddr window_end = std::min<VAddr>(
         std::max<VAddr>(window_start + WindowSize, device_addr + size), arena_end);
     if (window_end - window_start > FastSlotSize) {
+        fast_reason = 5;
         return false;
     }
     u32 slot;
     {
         std::scoped_lock lk{fast_mutex};
         if (fast_free_slots.empty()) {
+            fast_reason = 6;
             return false;
         }
         slot = fast_free_slots.back();
@@ -721,6 +828,7 @@ bool BufferCache::FastDoneReadback(VAddr device_addr, u64 size, bool is_write) {
                 for (const auto& w : entry->windows) {
                     if (w.start < window_end && window_start < w.start + w.size) {
                         give_back();
+                        fast_reason = 7;
                         return false;
                     }
                 }
@@ -743,6 +851,7 @@ bool BufferCache::FastDoneReadback(VAddr device_addr, u64 size, bool is_write) {
             });
         if (total_size_bytes == 0 || total_size_bytes > FastSlotSize) {
             give_back();
+            fast_reason = 8;
             return false;
         }
         for (auto& copy : copies) {
@@ -756,6 +865,7 @@ bool BufferCache::FastDoneReadback(VAddr device_addr, u64 size, bool is_write) {
             {arena, std::span<const vk::BufferCopy>(copies.data(), copies.size())}};
         if (!SideQueueCopy(*readback, work)) {
             give_back();
+            fast_reason = 9;
             return false;
         }
         ClassifyFault(Common::AlignDown(device_addr, WindowSize));
@@ -775,6 +885,7 @@ bool BufferCache::FastDoneReadback(VAddr device_addr, u64 size, bool is_write) {
         std::printf("uc3: done-window readbacks on the faulting thread: %u\n", n);
     }
     CompleteAsyncReadback(*readback, device_addr, size, is_write);
+    fast_reason = 10;
     return true;
 }
 
@@ -783,6 +894,11 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
     struct FaultDiag {
         int category = -1; // 0 unknown, 1 open, 2 in flight, 3 done
         bool false_dep = false;
+        VAddr addr = 0;
+        u64 size = 0;
+        u64 writer = 0;
+        bool from_page = false;
+        std::string info; // R.14 D4 diagnostics: own bytes GPU-written, page's GPU ranges
         std::chrono::steady_clock::time_point start;
         std::chrono::steady_clock::time_point cp_start;
         std::chrono::steady_clock::time_point cp_end;
@@ -796,6 +912,24 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
             const u64 ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now - start).count();
             diag_totals.count[category].fetch_add(1, std::memory_order_relaxed);
             diag_totals.ns[category].fetch_add(ns, std::memory_order_relaxed);
+            if (auto* thread = DiagThisThread()) {
+                thread->count.fetch_add(1, std::memory_order_relaxed);
+                thread->ns.fetch_add(ns, std::memory_order_relaxed);
+            }
+            if (Gow3Stats::d4_diag) {
+                const int kind = DiagWatchedThread();
+                Gow3Stats::fast_reason[kind < 0 ? 2 : kind][fast_reason].fetch_add(
+                    1, std::memory_order_relaxed);
+            }
+            if (const int kind = DiagWatchedThread(); kind >= 0) {
+                std::scoped_lock lock{diag_writer_mutex};
+                auto& row = diag_writers[kind][writer];
+                ++row.count;
+                row.ns += ns;
+                if (diag_samples[kind].size() < 6) {
+                    diag_samples[kind].push_back({addr, size, category, writer, from_page, info});
+                }
+            }
             const auto span = [](auto a, auto b) -> u64 {
                 return a.time_since_epoch().count() && b > a
                            ? std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count()
@@ -840,10 +974,80 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
                         "%llu faults %.1f ms; page tick unknown %llu\n",
                         line(1).c_str(), line(2).c_str(), line(3).c_str(), line(0).c_str(),
                         (unsigned long long)fc, ft / 1e6, (unsigned long long)pu);
+            struct Row {
+                const char* name;
+                u64 count;
+                u64 ns;
+            };
+            std::vector<Row> rows;
+            for (auto& slot : diag_threads) {
+                if (slot.used.load(std::memory_order_acquire)) {
+                    rows.push_back({slot.name, slot.count.exchange(0, std::memory_order_relaxed),
+                                    slot.ns.exchange(0, std::memory_order_relaxed)});
+                }
+            }
+            std::ranges::sort(rows, [](const Row& a, const Row& b) { return a.ns > b.ns; });
+            {
+                std::scoped_lock lock{diag_writer_mutex};
+                static constexpr const char* kinds[2] = {"GfxEop handler", "NdJobWorkerThread 0"};
+                for (int k = 0; k < 2; ++k) {
+                    std::printf("uc3 fault writers %s (5 s; writer: faults, ms; 1 = a draw, "
+                                "small = dispatch hash, big = task function):",
+                                kinds[k]);
+                    for (const auto& [w, row] : diag_writers[k]) {
+                        std::printf(" %llx: %llu, %.1f;", (unsigned long long)w,
+                                    (unsigned long long)row.count, row.ns / 1e6);
+                    }
+                    std::printf(" samples:");
+                    for (const auto& s : diag_samples[k]) {
+                        std::printf(" [%010llx +%llu cat %d writer %llx%s%s]",
+                                    (unsigned long long)s.addr, (unsigned long long)s.size,
+                                    s.category, (unsigned long long)s.writer,
+                                    s.from_page ? "" : " (window)", s.info.c_str());
+                    }
+                    std::printf("\n");
+                    diag_writers[k].clear();
+                    diag_samples[k].clear();
+                }
+            }
+            if (Gow3Stats::d4_diag) {
+                static constexpr const char* who[3] = {"GfxEop handler", "NdJobWorkerThread 0",
+                                                       "others"};
+                std::printf("uc3 D4 fast readback reasons (5 s; 0 not tried, 1 not ready, 2 no "
+                            "side queue, 3 all/hot, 4 arena, 5 window > slot, 6 no slot, "
+                            "7 pending overlap, 8 copy size, 9 side copy failed, 10 served):");
+                for (int k = 0; k < 3; ++k) {
+                    std::printf(" %s", who[k]);
+                    for (int r = 0; r < 11; ++r) {
+                        if (const u64 n = Gow3Stats::fast_reason[k][r].exchange(
+                                0, std::memory_order_relaxed)) {
+                            std::printf(" r%d=%llu", r, (unsigned long long)n);
+                        }
+                    }
+                    std::printf(";");
+                }
+                std::printf("\n");
+            }
+            std::printf("uc3 fault threads (5 s, faults, ms waited):");
+            for (size_t i = 0; i < rows.size() && i < 5; ++i) {
+                std::printf(" %s %llu %.1f;", rows[i].name, (unsigned long long)rows[i].count,
+                            rows[i].ns / 1e6);
+            }
+            std::printf("\n");
         }
     } fault_diag;
     if (from_fault && FaultCategoryDiag()) {
         fault_diag.start = std::chrono::steady_clock::now();
+        fault_diag.addr = device_addr;
+        fault_diag.size = size;
+        fault_diag.writer = DiagWriterOf(device_addr, fault_diag.from_page);
+        fast_reason = 0;
+        if (Gow3Stats::d4_diag && DiagWatchedThread() >= 0) {
+            fault_diag.info = fmt::format(
+                " own bytes {}; page ranges{}",
+                IsGpuModifiedBytes(device_addr, std::max<u64>(size, 1)) ? "GPU" : "clean",
+                DescribeGpuRanges(Common::AlignDown(device_addr, 4096), 4096));
+        }
         const VAddr window = device_addr >> WriteTickShift;
         if (!DiagWindowFaulted(window)) {
             diag_fault_windows[diag_fault_window_next.fetch_add(1, std::memory_order_relaxed) %
@@ -909,6 +1113,8 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
     }
     std::shared_ptr<AsyncReadback> pending;
     const auto flush_request = [this, device_addr, size, is_write, async, &pending, &fault_diag] {
+        Gow3Stats::Timer flush_timer{Gow3Stats::flush_ns};
+        Gow3Stats::flush_count.fetch_add(1, std::memory_order_relaxed);
         struct CpSpan {
             decltype(fault_diag)& diag;
             explicit CpSpan(decltype(fault_diag)& d) : diag{d} {
@@ -992,9 +1198,13 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
         }
         // A window still being read back asynchronously: its ranges are no longer in
         // gpu_modified_ranges, so let that readback land first.
-        for (const auto& window : windows) {
-            WaitAsyncReadbacks(window.start, window.start + window.size);
+        {
+            Gow3Stats::Timer wait_timer{Gow3Stats::flush_wait_ns};
+            for (const auto& window : windows) {
+                WaitAsyncReadbacks(window.start, window.start + window.size);
+            }
         }
+        Gow3Stats::Timer download_timer{Gow3Stats::flush_download_ns};
         if (async) {
             // uc3 (Drake's scarf, diagnosis): a side-queue readback lets the guest go on before
             // the work recorded so far runs; the graphics path waited for all of it, deferred

@@ -5,6 +5,7 @@
 
 #include "gow3_copy.h"
 
+#include <string>
 #include <deque>
 #include <memory>
 #include <mutex>
@@ -140,6 +141,8 @@ public:
     /// the GPU did not write again since, and clears them from gpu_modified_ranges.
     void CompleteLeafDownloads();
     /// uc3: only the gpu_modified_ranges part of IsGpuWritten (statistics).
+    /// uc3 (Fable R.14 D4 diagnostics): the gpu_modified_ranges inside [addr, addr + size).
+    [[nodiscard]] std::string DescribeGpuRanges(VAddr addr, u64 size);
     [[nodiscard]] bool IsGpuModifiedBytes(VAddr addr, u64 size) {
         const auto ranges_lock = RangesLock();
         return gpu_modified_ranges.Intersects(addr, size);

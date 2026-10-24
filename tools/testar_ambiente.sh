@@ -19,6 +19,6 @@ for t in memory-test fiber-test readback-queue-test page-state-test aliasing-tes
   else echo "$t: NAO COMPILOU (out/teste-build-$t.log)"; fi
 done
 echo "== 3. check-imports"
-export GOW3_GAME_DIR=D:/Uncharted/CUSA02344 GOW3_PATCH_DIR=D:/Uncharted/CUSA02344-UPDATE GOW3_EXECUTABLE=big3-ps4_Shipping.elf
+export GOW3_GAME_DIR=D:/Uncharted/Jogos/CUSA02344/CUSA02344 GOW3_PATCH_DIR=D:/Uncharted/Jogos/CUSA02344/CUSA02344-UPDATE GOW3_EXECUTABLE=big3-ps4_Shipping.elf
 /d/msys64/clang64/bin/python run.py --check-imports 2>&1 | tail -40
 echo "== FIM"

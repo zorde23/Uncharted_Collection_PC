@@ -13,6 +13,7 @@
 #include "gow3_toggles.h"
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <boost/preprocessor/stringize.hpp>
 
 #include "common/assert.h"
@@ -218,7 +219,43 @@ Liverpool::~Liverpool() {
     process_thread.join();
 }
 
+// uc3 A4.2 (GOW3_CMD_INORDER=1, off by default): a command (a guest fault's readback) runs on
+// the draw recording thread at its place in the draw pipe instead of stage A draining it first.
+// Same order guarantee (everything queued before it is recorded), and stage A keeps going.
+static bool CmdInOrder() {
+    static const bool on = [] {
+        const char* env = std::getenv("GOW3_CMD_INORDER");
+        return env && env[0] == '1';
+    }();
+    return on;
+}
+
+static void RunCommandTask(Vulkan::Rasterizer&, const u8* data) {
+    Common::UniqueFunction<void>* callback;
+    std::memcpy(&callback, data, sizeof(callback));
+    {
+        Gow3Stats::Timer timer{Gow3Stats::cmd_ns};
+        Gow3Stats::cmd_count.fetch_add(1, std::memory_order_relaxed);
+        (*callback)();
+    }
+    delete callback;
+}
+
 void Liverpool::ProcessCommands() {
+    if (rasterizer && CmdInOrder()) {
+        while (num_commands) {
+            auto* callback = new Common::UniqueFunction<void>{};
+            {
+                std::scoped_lock lk{submit_mutex};
+                *callback = std::move(command_queue.front());
+                command_queue.pop();
+                --num_commands;
+            }
+            // false: the pipe was off, so it drained and ran here (and deleted it).
+            rasterizer->RunInOrder(&RunCommandTask, &callback, sizeof(callback));
+        }
+        return;
+    }
     // gow3: commands touch the caches, so the draw recording thread runs dry first.
     // uc3: drained inside the loop, once a command is really there. Checking num_commands
     // before the loop and again in its condition let a command that arrived in between (a
@@ -238,6 +275,8 @@ void Liverpool::ProcessCommands() {
             command_queue.pop();
             --num_commands;
         }
+        Gow3Stats::Timer timer{Gow3Stats::cmd_ns};
+        Gow3Stats::cmd_count.fetch_add(1, std::memory_order_relaxed);
         callback();
     }
 }
@@ -744,6 +783,21 @@ void RunReleaseMem(Vulkan::Rasterizer& rasterizer, const u8* data) {
         SignalReleaseMem(rasterizer, task);
     }
 }
+
+// uc3 (GOW3_B_CENSUS): names for the stage B task census (registered always: the flag may not
+// be read yet during static initialization).
+[[maybe_unused]] const bool task_names_registered = [] {
+    {
+        Gow3Stats::NameTask(reinterpret_cast<const void*>(&RunEventWriteEop), "EOP");
+        Gow3Stats::NameTask(reinterpret_cast<const void*>(&RunEventWriteEos), "EOS");
+        Gow3Stats::NameTask(reinterpret_cast<const void*>(&RunReleaseMem), "ReleaseMem");
+        Gow3Stats::NameTask(reinterpret_cast<const void*>(&RunWriteData), "WriteData");
+        Gow3Stats::NameTask(reinterpret_cast<const void*>(&RunDmaData), "DmaData");
+        Gow3Stats::NameTask(reinterpret_cast<const void*>(&SignalFlip), "flip");
+        Gow3Stats::NameTask(reinterpret_cast<const void*>(&RunCommandTask), "readback command");
+    }
+    return true;
+}();
 } // namespace
 
 void Liverpool::NotePendingFences(const auto& event) {

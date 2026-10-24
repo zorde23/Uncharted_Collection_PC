@@ -34,7 +34,12 @@ public:
     /// Runs a packet on stage B.
     using Handler = void (*)(void* context, const u8* packet, u32 size);
 
-    DrawPipe(Handler handler_, void* context_) : handler{handler_}, context{context_} {
+    /// R.14 D1: called on stage B when it runs out of packets, before the last one counts as
+    /// consumed (a drain returns only after it: stage A may record once drained).
+    using IdleHook = void (*)(void* context);
+
+    DrawPipe(Handler handler_, void* context_, IdleHook idle_hook_ = nullptr)
+        : handler{handler_}, context{context_}, idle_hook{idle_hook_} {
         ring = std::make_unique<u8[]>(Capacity);
         thread = std::jthread([this](std::stop_token stop) { Run(stop); });
     }
@@ -239,6 +244,9 @@ private:
             processing_end = at + header->size;
             handler(context, reinterpret_cast<const u8*>(header + 1), header->payload);
             busy_cycles.fetch_add(__rdtsc() - start, std::memory_order_relaxed);
+            if (idle_hook && published.load(std::memory_order_acquire) == at + header->size) {
+                idle_hook(context);
+            }
             at += header->size;
             consumed.store(at, std::memory_order_release);
         }
@@ -247,6 +255,7 @@ private:
     static inline thread_local bool on_stage_b = false;
     Handler handler;
     void* context;
+    IdleHook idle_hook;
     std::unique_ptr<u8[]> ring;
     u64 head = 0; ///< stage A's write position
     u64 processing_end = 0; ///< stage B: end of the packet being run

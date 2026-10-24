@@ -831,6 +831,10 @@ public:
     /// it to the copy threads' completion (Gow3Copy::AfterCopies).
     void SignalAfterHostCopies(std::function<void()> signal);
 
+    /// Fable R.14 D1: stage B going idle kicks the fences still waiting in an open chunk (or
+    /// batched, D3), so a label the guest polls is not held while nothing else would kick.
+    void KickUnkickedSignals();
+
     /// gow3: before a guest-visible write that is not deferred (WriteData, end-of-shader
     /// fences, flip): waits until every signal handed to SignalAfterHostCopies ran, so that
     /// the write cannot overtake an earlier fence. Otherwise the guest, seeing the later value,
@@ -904,6 +908,8 @@ private:
     std::unique_ptr<RecordChunk> AcquireChunk();
 
     void RecorderThread(std::stop_token stoken);
+    /// R.14 D3: records one closure that runs batched_signals after the copies queued so far.
+    void EmitBatchedSignals();
 
     void SubmitExecution(SubmitInfo& info, bool async = false);
 
@@ -957,6 +963,8 @@ private:
     std::atomic<u64> host_copies_issued{0};
     std::atomic<u64> host_copies_done{0};
     std::atomic<u64> deferred_signals_issued{0}; ///< by the thread recording (A or B)
+    u32 unkicked_signals = 0; ///< R.14 D1: fences recorded (or batched) since the last kick
+    std::vector<std::function<void()>> batched_signals; ///< R.14 D3: run by one closure
     std::shared_ptr<std::atomic<u64>> deferred_signals_done =
         std::make_shared<std::atomic<u64>>(0);
     // gow3: whether recorder_thread runs, read on every Record(). std::jthread::joinable()

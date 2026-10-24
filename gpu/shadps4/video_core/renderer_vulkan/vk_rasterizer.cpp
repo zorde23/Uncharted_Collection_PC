@@ -54,7 +54,7 @@ enum StageBSlot : u32 {
     SbBindDma, SbObtain, SbInvalidate, SbAccessed, SbADraw, SbADispatch, SbAGfxPipe, SbACsPipe,
     SbAPost, SbAPRing, SbAPCopySrc, SbAPCopyMem, SbAPCheck, SbAPLeaves, SbAPWrite, SbAPResolve, SbAPSparse, SbAPFlush, SbRingPrep,
     SbDrPrelude, SbDrMotion, SbDrPush, SbDrDynState, SbDrSchedBegin, SbDrRecord, SbDrDump,
-    SbDrReset, SbDrKick, SbCount
+    SbDrReset, SbDrKick, SbAdHle, SbAdPost, SbAdRing, SbAdWrite, SbCount
 };
 constexpr const char* stageb_names[SbCount] = {"tasks", "leaf copies", "special", "dispatch",
                                                "draw", "draw:prepare", "draw:bind",
@@ -68,7 +68,9 @@ constexpr const char* stageb_names[SbCount] = {"tasks", "leaf copies", "special"
                                                "draw:prelude", "draw:motion", "draw:push",
                                                "draw:dyn state", "draw:sched begin",
                                                "draw:record", "draw:dump", "draw:reset",
-                                               "draw:kick"};
+                                               "draw:kick", "A:dispatch hle check",
+                                               "A:post (dispatch)", "P:ring (dispatch)",
+                                               "P:write (dispatch)"};
 std::atomic<u64> stageb_cycles[SbCount];
 std::atomic<u64> stageb_counts[SbCount];
 std::atomic<u64> ring_bytes{0}; ///< R.12: added on the copy thread with GOW3_RING_PREP
@@ -151,7 +153,13 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     GpuProfiler::Init(instance, scheduler);
     if (DrawPipeWanted()) {
         constant_ring = std::make_unique<ConstantRing>(instance, scheduler);
-        draw_pipe = std::make_unique<DrawPipe>(&RunDrawPacket, this);
+        // R.14 D1: with lazy fence kicks, stage B kicks unkicked fences when it runs dry.
+        const DrawPipe::IdleHook idle_hook =
+            Gow3Stats::lazy_fence_kick ? +[](void* context) {
+                static_cast<Rasterizer*>(context)->scheduler.KickUnkickedSignals();
+            }
+                                       : nullptr;
+        draw_pipe = std::make_unique<DrawPipe>(&RunDrawPacket, this, idle_hook);
         if (RingCopier::Wanted()) {
             ring_copier = std::make_unique<RingCopier>(
                 [](void* context, VAddr address, const void* src, u8* dst, u64 size, u64 offset) {
@@ -525,8 +533,13 @@ bool Rasterizer::OnStageA() const {
 }
 
 namespace {
-/// Stage A: cycles waited per drain site (GOW3_FRAME_STATS), keyed by function name and line.
-std::unordered_map<const char*, std::unordered_map<u32, u64>> drain_sites;
+/// Stage A: cycles waited and drains that waited, per drain site (GOW3_FRAME_STATS), keyed by
+/// function name and line.
+struct DrainSite {
+    u64 waited = 0;
+    u64 count = 0;
+};
+std::unordered_map<const char*, std::unordered_map<u32, DrainSite>> drain_sites;
 } // namespace
 
 void Rasterizer::DrainDrawPipe(u32 reason, u32 line, const char* function) {
@@ -541,7 +554,9 @@ void Rasterizer::DrainDrawPipe(u32 reason, u32 line, const char* function) {
     const u64 before = draw_pipe->drain_cycles;
     draw_pipe->Drain(reason);
     if (const u64 waited = draw_pipe->drain_cycles - before) {
-        drain_sites[function][line] += waited;
+        auto& site = drain_sites[function][line];
+        site.waited += waited;
+        ++site.count;
     }
 }
 
@@ -1043,7 +1058,8 @@ void Rasterizer::VerifyRingBinding(const RingBinding& ring, const u32* flat) {
 void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_prepared,
                           bool is_indexed, u32 index_offset, const AmdGpu::ComputeProgram* cs,
                           const IndirectDraw* indirect) {
-    StageBTimer post_timer{SbAPost};
+    // Fable R.14 D0: dispatches count in their own slots (A:post, P:ring, P:write).
+    StageBTimer post_timer{cs ? SbAdPost : SbAPost};
     auto& dirty = liverpool->pipe_dirty;
     if (!pipe_synced) {
         // Stage B has not run yet: its register copy starts as this one.
@@ -1105,7 +1121,7 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
             ring.clear();
             leaves.clear();
             if (constant_ring && !Gow3Toggle::Disabled(Gow3Toggle::ConstantRing)) {
-                StageBTimer ring_timer{SbAPRing};
+                StageBTimer ring_timer{cs ? SbAdRing : SbAPRing};
                 if (ring_prep) {
                     CollectRingSlots(*stage, used_prepared, ring, leaves);
                 } else {
@@ -1121,7 +1137,8 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
                     reads_flat |= desc.buffer_type == Shader::BufferType::Flatbuf;
                 }
                 static std::atomic<int> traced{0};
-                if (std::getenv("GOW3_SRT_TRACE") && reads_flat && traced.fetch_add(1) < 10) {
+                static const bool srt_trace = std::getenv("GOW3_SRT_TRACE") != nullptr;
+                if (srt_trace && reads_flat && traced.fetch_add(1) < 10) {
                     const bool has_flatbuf = reads_flat;
                     std::printf("leaf copy: no ring for shader %016llx (stage %u): %zu leaves "
                             "(first dw %u), "
@@ -1177,7 +1194,7 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
         size += sizeof(AmdGpu::Regs);
     }
 
-    StageBTimer write_timer{SbAPWrite};
+    StageBTimer write_timer{cs ? SbAdWrite : SbAPWrite};
     u8* out = draw_pipe->Begin(size);
     u8* const start = out;
     auto& packet = *reinterpret_cast<DrawPacket*>(out);
@@ -1269,6 +1286,185 @@ void Rasterizer::RetireSubmission() {
     }
 }
 
+// uc3 (GOW3_B_CENSUS=1, diagnostic, Fable R.14): dispatches recorded by stage B, per shader.
+namespace {
+struct DispatchCensus {
+    u64 count = 0;
+    u64 groups = 0;
+    u64 indirect = 0;
+    u64 after_draw = 0;
+    u32 buffers = 0;
+    u32 images = 0;
+    u32 written = 0; ///< buffers + images the shader writes
+};
+std::mutex census_mutex;
+std::unordered_map<u64, DispatchCensus> census_dispatches;
+thread_local bool census_last_was_draw = false;
+void NoteDispatchCensus(const Shader::Info& info, const AmdGpu::ComputeProgram& cs, bool indirect) {
+    u32 written = 0;
+    for (const auto& buffer : info.buffers) {
+        written += buffer.is_written ? 1 : 0;
+    }
+    for (const auto& image : info.images) {
+        written += image.is_written ? 1 : 0;
+    }
+    std::scoped_lock lock{census_mutex};
+    auto& entry = census_dispatches[info.pgm_hash];
+    ++entry.count;
+    entry.groups += indirect ? 0 : u64(cs.dim_x) * cs.dim_y * cs.dim_z;
+    entry.indirect += indirect ? 1 : 0;
+    entry.after_draw += census_last_was_draw ? 1 : 0;
+    entry.buffers = static_cast<u32>(info.buffers.size());
+    entry.images = static_cast<u32>(info.images.size());
+    entry.written = written;
+    census_last_was_draw = false;
+}
+// Fable R.14 D0 (2, 3): the V#s of the two most frequent ACB dispatches. Distinct sets per
+// window, and the buffers of the first 10 dispatches in two consecutive frames (once).
+constexpr u64 kCensusShaders[2] = {0x8f067540ull, 0x7d7e7206ull};
+struct SharpCensus {
+    u64 dispatches = 0;
+    u64 total = 0;
+    std::unordered_set<u64> sets;
+    u64 sample_frame = 0; ///< first sampled frame (0: not started)
+    u32 sampled[2]{};     ///< dispatches printed in sample_frame and the next one
+};
+SharpCensus sharp_census[2];
+std::mutex sharp_mutex;
+void NoteSharpCensus(const Shader::Info& info, Rasterizer& rasterizer) {
+    const int which = info.pgm_hash == kCensusShaders[0] ? 0 : info.pgm_hash == kCensusShaders[1] ? 1 : -1;
+    if (which < 0) {
+        return;
+    }
+    std::array<AmdGpu::Buffer, 16> sharps{};
+    std::array<bool, 16> written{};
+    u32 count = 0;
+    for (const auto& buffer : info.buffers) {
+        if (buffer.IsSpecial() || count == sharps.size()) {
+            continue;
+        }
+        written[count] = buffer.is_written;
+        sharps[count++] = buffer.GetSharp(info);
+    }
+    const u64 set = XXH3_64bits(sharps.data(), count * sizeof(AmdGpu::Buffer));
+    const u64 frame = Gow3Stats::frame_ticks.load(std::memory_order_relaxed);
+    std::scoped_lock lock{sharp_mutex};
+    auto& census = sharp_census[which];
+    ++census.dispatches;
+    ++census.total;
+    census.sets.insert(set);
+    // Sample after the scene settled (about 10 s of play).
+    if (census.sample_frame == 0 && census.total >= 300000) {
+        census.sample_frame = frame + 1;
+    }
+    if (census.sample_frame == 0 || frame < census.sample_frame || frame > census.sample_frame + 1) {
+        return;
+    }
+    const u32 slot = static_cast<u32>(frame - census.sample_frame);
+    if (census.sampled[slot] >= 10) {
+        return;
+    }
+    const u32 n = census.sampled[slot]++;
+    std::printf("uc3 sharps %016llx frame +%u #%u set %016llx:",
+                static_cast<unsigned long long>(info.pgm_hash), slot, n,
+                static_cast<unsigned long long>(set));
+    for (u32 i = 0; i < count; ++i) {
+        const auto& sharp = sharps[i];
+        const u64 size = sharp.GetSize();
+        const bool gpu = sharp.base_address && size && rasterizer.IsGpuWritten(sharp.base_address, size);
+        std::printf(" [%u %s %010llx stride %u records %u%s]", i, written[i] ? "W" : "R",
+                    static_cast<unsigned long long>(sharp.base_address), sharp.GetStride(),
+                    sharp.num_records, gpu ? " gpu" : "");
+    }
+    std::printf("\n");
+}
+
+void PrintBCensus(double seconds) {
+    {
+        std::scoped_lock lock{sharp_mutex};
+        std::printf("  B census, V# sets (5 s window): ");
+        for (int i = 0; i < 2; ++i) {
+            auto& census = sharp_census[i];
+            std::printf("%016llx %.0f dispatches/s, %zu distinct sets; ",
+                        static_cast<unsigned long long>(kCensusShaders[i]),
+                        census.dispatches / seconds, census.sets.size());
+            census.dispatches = 0;
+            census.sets.clear();
+        }
+        const u64 kicks = Gow3Stats::rec_kicks.exchange(0, std::memory_order_relaxed);
+        const u64 chunks = Gow3Stats::rec_kick_chunks.exchange(0, std::memory_order_relaxed);
+        const u64 bytes = Gow3Stats::rec_kick_bytes.exchange(0, std::memory_order_relaxed);
+        const u64 wakes = Gow3Stats::rec_wakes.exchange(0, std::memory_order_relaxed);
+        const u64 exec_ns = Gow3Stats::rec_exec_ns.exchange(0, std::memory_order_relaxed);
+        std::printf("recorder: %.0f kicks/s, %.2f chunks and %.0f bytes per kick, %.0f%% woke "
+                    "it, busy %.1f%%\n",
+                    kicks / seconds, kicks ? double(chunks) / kicks : 0.0,
+                    kicks ? double(bytes) / kicks : 0.0, kicks ? 100.0 * wakes / kicks : 0.0,
+                    exec_ns / seconds / 1e7);
+        const u64 kf = Gow3Stats::fence_kicks_forced.exchange(0, std::memory_order_relaxed);
+        const u64 ff = Gow3Stats::fences_forced.exchange(0, std::memory_order_relaxed);
+        const u64 kn = Gow3Stats::fence_kicks_natural.exchange(0, std::memory_order_relaxed);
+        const u64 fn = Gow3Stats::fences_natural.exchange(0, std::memory_order_relaxed);
+        const u64 idle = Gow3Stats::idle_kicks.exchange(0, std::memory_order_relaxed);
+        if (Gow3Stats::d4_diag) {
+            const u64 fc = Gow3Stats::fill_cpu.exchange(0, std::memory_order_relaxed);
+            const u64 fg = Gow3Stats::fill_gpu.exchange(0, std::memory_order_relaxed);
+            const u64 fo = Gow3Stats::fill_gpu_own_bytes.exchange(0, std::memory_order_relaxed);
+            std::printf("  D4 fills to memory: %.0f/s on the CPU, %.0f/s on the GPU (%.0f/s with "
+                        "their own bytes GPU-written)\n",
+                        fc / seconds, fg / seconds, fo / seconds);
+        }
+        std::printf("  fence kicks (lazy %d, batch %d): forced %.0f/s carrying %.2f fences, "
+                    "natural %.0f/s carrying %.2f, stage B idle kicks %.0f/s\n",
+                    Gow3Stats::lazy_fence_kick, Gow3Stats::fence_batch, kf / seconds,
+                    kf ? double(ff) / kf : 0.0, kn / seconds, kn ? double(fn) / kn : 0.0,
+                    idle / seconds);
+    }
+    std::vector<std::pair<u64, DispatchCensus>> top;
+    u64 total = 0;
+    {
+        std::scoped_lock lock{census_mutex};
+        top.assign(census_dispatches.begin(), census_dispatches.end());
+        census_dispatches.clear();
+    }
+    for (const auto& [hash, entry] : top) {
+        total += entry.count;
+    }
+    std::ranges::sort(top, [](const auto& a, const auto& b) { return a.second.count > b.second.count; });
+    std::printf("  B census, dispatches %.0f/s in %zu shaders; top (hash: /s, groups avg, "
+                "buffers/images/written, %% after a draw, %% indirect):",
+                total / seconds, top.size());
+    for (size_t i = 0; i < top.size() && i < 10; ++i) {
+        const auto& [hash, e] = top[i];
+        const u64 direct = e.count - e.indirect;
+        std::printf(" %016llx: %.0f, %.1f, %u/%u/%u, %.0f%%, %.0f%%;",
+                    static_cast<unsigned long long>(hash), e.count / seconds,
+                    direct ? double(e.groups) / direct : 0.0, e.buffers, e.images, e.written,
+                    100.0 * e.after_draw / e.count, 100.0 * e.indirect / e.count);
+    }
+    std::printf("\n  B census, tasks (/s, us each):");
+    for (auto& slot : Gow3Stats::task_stats) {
+        const void* fn = slot.fn.load(std::memory_order_relaxed);
+        if (!fn) {
+            break;
+        }
+        const u64 n = slot.count.exchange(0, std::memory_order_relaxed);
+        const u64 ns = slot.ns.exchange(0, std::memory_order_relaxed);
+        if (!n) {
+            continue;
+        }
+        if (slot.name) {
+            std::printf(" %s %.0f %.2f;", slot.name, n / seconds, ns / 1e3 / n);
+        } else {
+            std::printf(" %p %.0f %.2f;", fn, n / seconds, ns / 1e3 / n);
+        }
+    }
+    std::printf(" recording kicks from SignalAfterHostCopies %.0f/s\n",
+                Gow3Stats::signal_after_copies_kicks.exchange(0, std::memory_order_relaxed) /
+                    seconds);
+}
+} // namespace
+
 bool Rasterizer::RunInOrder(OrderedTask task, const void* data, u32 size, u64 toggle) {
     if (!UseDrawPipe() || Gow3Toggle::Disabled(toggle)) {
         DrainDrawPipe(DrawPipe::ReasonRasterizer);
@@ -1288,6 +1484,20 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
     if (*reinterpret_cast<const PacketKind*>(data) == PacketKind::Task) {
         const auto& task = *reinterpret_cast<const TaskPacket*>(data);
         StageBTimer timer{SbTask};
+        if (Gow3Stats::b_census) {
+            Gow3Stats::diag_writer.store(reinterpret_cast<u64>(task.task), std::memory_order_relaxed);
+            const auto start = std::chrono::steady_clock::now();
+            task.task(self, data + sizeof(TaskPacket));
+            if (auto* slot = Gow3Stats::TaskSlot(reinterpret_cast<const void*>(task.task))) {
+                slot->count.fetch_add(1, std::memory_order_relaxed);
+                slot->ns.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                       std::chrono::steady_clock::now() - start)
+                                       .count(),
+                                   std::memory_order_relaxed);
+            }
+            census_last_was_draw = false;
+            return;
+        }
         task.task(self, data + sizeof(TaskPacket));
         return;
     }
@@ -1426,6 +1636,11 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
         StageBTimer timer{SbDispatch};
         stage_cs = cs;
         const auto* pipeline = static_cast<const ComputePipeline*>(packet.pipeline);
+        if (Gow3Stats::b_census) {
+            NoteDispatchCensus(pipeline->GetStage(Shader::SwStage::Compute), *cs, indirect != nullptr);
+            Gow3Stats::diag_writer.store(pipeline->GetStage(Shader::SwStage::Compute).pgm_hash,
+                                         std::memory_order_relaxed);
+        }
         if (indirect) {
             self.DispatchIndirectRecord(pipeline, indirect->args, indirect->stride);
         } else {
@@ -1434,10 +1649,14 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
         stage_cs = nullptr;
     } else if (indirect) {
         StageBTimer timer{SbDraw};
+        census_last_was_draw = true;
+        Gow3Stats::diag_writer.store(1, std::memory_order_relaxed);
         self.DrawIndirectRecord(static_cast<const GraphicsPipeline*>(packet.pipeline),
                                 packet.is_indexed, *indirect);
     } else {
         StageBTimer timer{SbDraw};
+        census_last_was_draw = true;
+        Gow3Stats::diag_writer.store(1, std::memory_order_relaxed);
         self.DrawRecord(static_cast<const GraphicsPipeline*>(packet.pipeline), packet.prepared,
                         packet.is_indexed, packet.index_offset);
     }
@@ -1617,6 +1836,9 @@ void Rasterizer::PrintPipeStats() {
             }
         }
         std::printf("\n");
+        if (Gow3Stats::b_census) {
+            PrintBCensus(seconds);
+        }
         const u64 submits = gow3_submit_count.exchange(0, std::memory_order_relaxed);
         if (submits) {
             static constexpr const char* steps[6] = {"on_submit", "end rendering",
@@ -1646,11 +1868,37 @@ void Rasterizer::PrintPipeStats() {
             }
         }
     }
-    std::printf("\n  stage A waits over 0.5%%:");
+    {
+        // uc3 (Fable A4.2b): what the readback commands and the readback work cost.
+        const auto take = [](std::atomic<u64>& v) { return v.exchange(0, std::memory_order_relaxed); };
+        const u64 cmds = take(Gow3Stats::cmd_count), cmd_ns = take(Gow3Stats::cmd_ns);
+        const u64 res = take(Gow3Stats::resolve_count), res_ns = take(Gow3Stats::resolve_ns);
+        const u64 fl = take(Gow3Stats::flush_count), fl_ns = take(Gow3Stats::flush_ns);
+        const u64 fl_wait = take(Gow3Stats::flush_wait_ns), fl_dl = take(Gow3Stats::flush_download_ns);
+        const auto each = [](u64 ns, u64 n) { return n ? ns / 1e3 / n : 0.0; };
+        std::printf("\n  readback commands: %.0f/s, %.1f us each, %.1f%% of a thread; resolves %.0f/s "
+                    "%.1f us; flushes %.0f/s %.1f us (async wait %.1f, downloads %.1f, rest %.1f)",
+                    cmds / seconds, each(cmd_ns, cmds), cmd_ns / seconds / 1e7, res / seconds,
+                    each(res_ns, res), fl / seconds, each(fl_ns, fl), each(fl_wait, fl),
+                    each(fl_dl, fl), each(fl_ns > fl_wait + fl_dl ? fl_ns - fl_wait - fl_dl : 0, fl));
+        u64 rej[5], big[5];
+        for (int i = 0; i < 5; ++i) {
+            rej[i] = take(Gow3Stats::size_reject_hist[i]);
+            big[i] = take(Gow3Stats::big_pipe_hist[i]);
+        }
+        std::printf("\n  scalar copy sizes/s (<=256, <=4K, <=64K, <=1M, >1M): refused for size "
+                    "%.0f %.0f %.0f %.0f %.0f; handed to B %.0f %.0f %.0f %.0f %.0f",
+                    rej[0] / seconds, rej[1] / seconds, rej[2] / seconds, rej[3] / seconds,
+                    rej[4] / seconds, big[0] / seconds, big[1] / seconds, big[2] / seconds,
+                    big[3] / seconds, big[4] / seconds);
+    }
+    // uc3: a site shows when it costs over 0.5% or waits 20 times a second or more.
+    std::printf("\n  stage A waits over 0.5%% or 20/s (%% of time, waits/s):");
     for (const auto& [function, lines] : drain_sites) {
-        for (const auto& [line, waited] : lines) {
-            if (waited * 200 > cycles) {
-                std::printf(" %s:%u %.1f%%", function, line, 100.0 * waited / cycles);
+        for (const auto& [line, site] : lines) {
+            if (site.waited * 200 > cycles || site.count >= 20 * seconds) {
+                std::printf(" %s:%u %.1f%% %.0f/s", function, line, 100.0 * site.waited / cycles,
+                            site.count / seconds);
             }
         }
     }
@@ -2085,6 +2333,10 @@ void Rasterizer::DumpOnDraw(const GraphicsPipeline* pipeline) {
     static const char* dump_ps = std::getenv("GOW3_DUMP_PS");
     static const char* dump_trigger = std::getenv("GOW3_DUMP_TRIGGER");
     static int dump_index = 0;
+    // uc3: nothing to dump (no GOW3_DUMP_PS trigger, no capture points): leave before any work.
+    if (!(dump_ps && dump_trigger) && CaptureDumpPoints().empty()) {
+        return;
+    }
     const auto* dps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
     // uc3: read once. A getenv per draw cost ~2.2 us of stage B (v0.3.4 Cidadela 48 -> 37 FPS).
     static const char* dump_images = std::getenv("GOW3_DUMP_IMAGES");
@@ -2471,12 +2723,45 @@ void Rasterizer::DispatchDirect(bool acb_undrained) {
     if (!pipeline) {
         return;
     }
-    if (pipelined &&
-        !IsGuestMemoryShaderHLE(pipeline->GetStage(Shader::SwStage::Compute).pgm_hash)) {
+    StageBTimer hle_timer{SbAdHle};
+    const bool guest_hle =
+        IsGuestMemoryShaderHLE(pipeline->GetStage(Shader::SwStage::Compute).pgm_hash);
+    hle_timer.Stop();
+    if (Gow3Stats::b_census) {
+        NoteSharpCensus(pipeline->GetStage(Shader::SwStage::Compute), *this);
+    }
+    if (pipelined && !guest_hle) {
         PostDraw(pipeline, nullptr, false, 0, &CsRegs());
         return;
     }
     if (pipelined) {
+        // uc3 A4.1c (GOW3_HLE_BIG_PIPE=1, off by default): a copy of 1 MB or more (the scene
+        // depth) ends as a GPU copy after SyncImageToBuffer, writing no guest memory from the
+        // CPU: hand it over like any dispatch instead of draining (~47/s, ~3.4 ms each in the
+        // Cidadela). The recording thread runs the HLE in order, as owner of the caches.
+        static const bool big_pipe = [] {
+            const char* env = std::getenv("GOW3_HLE_BIG_PIPE");
+            return env && env[0] == '1';
+        }();
+        unsigned long long big_dst = 0;
+        const unsigned long long big_size =
+            big_pipe ? ScalarCopyBytes(pipeline->GetStage(Shader::SwStage::Compute), CsRegs(), &big_dst)
+                     : 0;
+        if (big_pipe && big_dst && big_size >= BigPipeMin()) {
+            // As the in-order path: the destination is pending until the recording thread runs
+            // the copy (it may end as a guest copy), so a later draw does not read it stale.
+            NotePendingGpuWrite(big_dst, big_size);
+            NoteHleInOrderWrite(big_dst, big_size);
+            Gow3Stats::big_pipe_hist[Gow3Stats::SizeBucket(big_size)].fetch_add(
+                1, std::memory_order_relaxed);
+            static std::atomic<u32> handed{0};
+            const u32 n = handed.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (n <= 2 || (n & 4095) == 0) {
+                std::printf("uc3: big scalar copies handed to the recording thread: %u\n", n);
+            }
+            PostDraw(pipeline, nullptr, false, 0, &CsRegs());
+            return;
+        }
         // uc3 (GOW3_HLE_INORDER_GFX=1, off by default): a scalar copy on the graphics queue
         // snapshots its source here and writes the destination on the recording thread, in
         // order, instead of draining it (~7% of the command processor in the castle).
@@ -2632,6 +2917,7 @@ void Rasterizer::Finish() {
 
 void Rasterizer::OnSubmit() {
     DrainDrawPipe();
+    Gow3Stats::frame_ticks.fetch_add(1, std::memory_order_relaxed);
     buffer_cache.TickFrame();
     buffer_cache.CompleteLeafDownloads();
     texture_cache.ProcessDownloadImages();
@@ -4564,7 +4850,26 @@ void Rasterizer::FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds
                "FillBuffer address and size must be a multiple of 4 bytes");
     if (!is_gds) {
         texture_cache.ClearMeta(address);
-        if (!buffer_cache.IsRegionGpuModified(address, num_bytes)) {
+        const bool gpu_page = buffer_cache.IsRegionGpuModified(address, num_bytes);
+        if (Gow3Stats::d4_diag) {
+            // Fable R.14 D4 diagnostics: which branch small immediate fills take, and why.
+            (gpu_page ? Gow3Stats::fill_gpu : Gow3Stats::fill_cpu)
+                .fetch_add(1, std::memory_order_relaxed);
+            if (gpu_page) {
+                const bool own = buffer_cache.IsGpuModifiedBytes(address, num_bytes);
+                Gow3Stats::fill_gpu_own_bytes.fetch_add(own ? 1 : 0, std::memory_order_relaxed);
+                static std::atomic<u32> printed{0};
+                if (printed.fetch_add(1, std::memory_order_relaxed) < 12) {
+                    std::printf("uc3 D4 fill on GPU: %010llx +%u value %08x, own bytes %s; page "
+                                "ranges%s\n",
+                                static_cast<unsigned long long>(address), num_bytes, value,
+                                own ? "GPU" : "clean",
+                                buffer_cache.DescribeGpuRanges(address & ~VAddr{4095}, 4096)
+                                    .c_str());
+                }
+            }
+        }
+        if (!gpu_page) {
             u32* buffer = std::bit_cast<u32*>(address);
             std::fill(buffer, buffer + (num_bytes / sizeof(u32)), value);
             return;

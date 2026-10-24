@@ -219,6 +219,13 @@ void Scheduler::SignalAfterHostCopies(std::function<void()> signal) {
         signal();
         return;
     }
+    if (Gow3Stats::fence_batch) {
+        // R.14 D3: the next kick records one closure for every fence batched until then.
+        deferred_signals_issued.fetch_add(1, std::memory_order_relaxed);
+        batched_signals.push_back(std::move(signal));
+        ++unkicked_signals;
+        return;
+    }
     Gow3Copy::FlushBatch();
     deferred_signals_issued.fetch_add(1, std::memory_order_relaxed);
     Record([signal = std::move(signal), done = deferred_signals_done](vk::CommandBuffer) mutable {
@@ -227,6 +234,35 @@ void Scheduler::SignalAfterHostCopies(std::function<void()> signal) {
             done->fetch_add(1, std::memory_order_release);
         });
     });
+    if (Gow3Stats::lazy_fence_kick) {
+        // R.14 D1: leaves with the next kick (KickUnkickedSignals when stage B runs dry).
+        ++unkicked_signals;
+        return;
+    }
+    if (Gow3Stats::b_census) {
+        Gow3Stats::signal_after_copies_kicks.fetch_add(1, std::memory_order_relaxed);
+    }
+    KickRecording(true);
+}
+
+void Scheduler::EmitBatchedSignals() {
+    Gow3Copy::FlushBatch();
+    Record([signals = std::exchange(batched_signals, {}),
+            done = deferred_signals_done](vk::CommandBuffer) mutable {
+        Gow3Copy::AfterCopies([signals = std::move(signals), done = std::move(done)] {
+            for (auto& signal : signals) {
+                signal();
+                done->fetch_add(1, std::memory_order_release);
+            }
+        });
+    });
+}
+
+void Scheduler::KickUnkickedSignals() {
+    if (unkicked_signals == 0) {
+        return;
+    }
+    Gow3Stats::idle_kicks.fetch_add(1, std::memory_order_relaxed);
     KickRecording(true);
 }
 
@@ -295,12 +331,33 @@ void Scheduler::KickRecording(bool force) {
     if (!force && full_chunks.empty() && record_chunk->Size() < 32 * 1024) {
         return;
     }
+    if (!batched_signals.empty()) {
+        EmitBatchedSignals();
+    }
     if (full_chunks.empty() && record_chunk->Empty()) {
         return;
+    }
+    if (unkicked_signals) {
+        (force ? Gow3Stats::fence_kicks_forced : Gow3Stats::fence_kicks_natural)
+            .fetch_add(1, std::memory_order_relaxed);
+        (force ? Gow3Stats::fences_forced : Gow3Stats::fences_natural)
+            .fetch_add(unkicked_signals, std::memory_order_relaxed);
+        unkicked_signals = 0;
     }
     bool wake;
     {
         std::scoped_lock lk{recorder_mutex};
+        if (Gow3Stats::b_census) {
+            u64 bytes = record_chunk->Size();
+            for (const auto& chunk : full_chunks) {
+                bytes += chunk->Size();
+            }
+            Gow3Stats::rec_kicks.fetch_add(1, std::memory_order_relaxed);
+            Gow3Stats::rec_kick_chunks.fetch_add(full_chunks.size() + (record_chunk->Empty() ? 0 : 1),
+                                                 std::memory_order_relaxed);
+            Gow3Stats::rec_kick_bytes.fetch_add(bytes, std::memory_order_relaxed);
+            Gow3Stats::rec_wakes.fetch_add(recorder_sleeping ? 1 : 0, std::memory_order_relaxed);
+        }
         for (auto& chunk : full_chunks) {
             recorder_queue.push_back(std::move(chunk));
         }
@@ -362,7 +419,16 @@ void Scheduler::RecorderThread(std::stop_token stoken) {
             recorder_busy = true;
         }
         // current_cmdbuf only changes after SyncRecording(), which waits for this thread.
-        chunk->Execute(current_cmdbuf);
+        if (Gow3Stats::b_census) {
+            const auto start = std::chrono::steady_clock::now();
+            chunk->Execute(current_cmdbuf);
+            Gow3Stats::rec_exec_ns.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                 std::chrono::steady_clock::now() - start)
+                                                 .count(),
+                                             std::memory_order_relaxed);
+        } else {
+            chunk->Execute(current_cmdbuf);
+        }
         {
             std::scoped_lock lk{recorder_mutex};
             free_chunks.push_back(std::move(chunk));

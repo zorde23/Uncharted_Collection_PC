@@ -14,12 +14,12 @@ Get-ChildItem env: | Where-Object { $_.Name -like 'UC_*' } | ForEach-Object { Se
 # Layout antigo: junctions CUSA02344\app0 e \patch. Layout novo: jogo em CUSA02344, atualizacao em CUSA02344-UPDATE.
 if ($env:GOW3_GAME_DIR) {
     if (-not $env:GOW3_PATCH_DIR) { $env:GOW3_PATCH_DIR = "$($env:GOW3_GAME_DIR)-UPDATE" }
-} elseif (Test-Path 'D:/Uncharted/CUSA02344/app0') {
-    $env:GOW3_GAME_DIR = 'D:/Uncharted/CUSA02344/app0'
-    $env:GOW3_PATCH_DIR = 'D:/Uncharted/CUSA02344/patch'
+} elseif (Test-Path 'D:/Uncharted/Jogos/CUSA02344/CUSA02344/app0') {
+    $env:GOW3_GAME_DIR = 'D:/Uncharted/Jogos/CUSA02344/CUSA02344/app0'
+    $env:GOW3_PATCH_DIR = 'D:/Uncharted/Jogos/CUSA02344/CUSA02344/patch'
 } else {
-    $env:GOW3_GAME_DIR = 'D:/Uncharted/CUSA02344'
-    $env:GOW3_PATCH_DIR = 'D:/Uncharted/CUSA02344-UPDATE'
+    $env:GOW3_GAME_DIR = 'D:/Uncharted/Jogos/CUSA02344/CUSA02344'
+    $env:GOW3_PATCH_DIR = 'D:/Uncharted/Jogos/CUSA02344/CUSA02344-UPDATE'
 }
 $env:GOW3_EXECUTABLE = 'big3-ps4_Shipping.elf'
 # Leituras precisas da GPU (readbacks_mode 2 do shadPS4): o modo em que o cenario aparece.

@@ -252,6 +252,8 @@ bool TextureCache::ResolveReadbacks(VAddr address, u64 size, bool assume_locks,
         if (!pending_readbacks.RequiredTick(address, size)) return false;
     }
     const auto resolve = [this, address, size, source] {
+        Gow3Stats::Timer resolve_timer{Gow3Stats::resolve_ns};
+        Gow3Stats::resolve_count.fetch_add(1, std::memory_order_relaxed);
         const bool diag = Vulkan::WaitDiagnostics::Enabled();
         std::scoped_lock lock{readback_mutex};
         bool waited = false;

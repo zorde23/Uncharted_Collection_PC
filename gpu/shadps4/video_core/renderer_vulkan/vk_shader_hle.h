@@ -24,6 +24,10 @@ bool IsGuestMemoryShaderHLE(unsigned long long pgm_hash);
 /// the destination write runs in order on the recording thread. False: drain and dispatch.
 bool HleInOrderEnabled();
 void NoteInOrderReject(unsigned reason);
+/// uc3 (A4.1c): bytes a scalar copy dispatch would copy, 0 when it cannot tell.
+unsigned long long ScalarCopyBytes(const Shader::Info& info, const AmdGpu::ComputeProgram& cs_program,
+                                   unsigned long long* dst_address = nullptr);
+unsigned long long BigPipeMin();
 bool ExecuteScalarCopyInOrder(const Shader::Info& info, const AmdGpu::ComputeProgram& cs_program,
                               Rasterizer& rasterizer);
 

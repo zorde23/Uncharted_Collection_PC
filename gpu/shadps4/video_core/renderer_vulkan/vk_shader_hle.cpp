@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 #include "core/memory.h"
 #include "shader_recompiler/info.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
@@ -482,6 +483,16 @@ struct InOrderCopy {
     u32 pad;
 };
 constexpr u32 IN_ORDER_COPY_MAX = 256;
+// uc3 A4.1: GOW3_HLE_INORDER_MAX=<bytes> raises the size limit (default 256, at most 64 KiB);
+// in the Cidadela most fallbacks were copies above 256 bytes.
+u32 InOrderCopyMax() {
+    static const u32 max = [] {
+        const char* env = std::getenv("GOW3_HLE_INORDER_MAX");
+        const long v = env ? std::strtol(env, nullptr, 10) : 0;
+        return v > 0 ? static_cast<u32>(std::min<long>(v, 65536)) : IN_ORDER_COPY_MAX;
+    }();
+    return max;
+}
 
 void RunInOrderCopy(Rasterizer& rasterizer, const u8* data) {
     const auto& copy = *reinterpret_cast<const InOrderCopy*>(data);
@@ -492,6 +503,12 @@ void RunInOrderCopy(Rasterizer& rasterizer, const u8* data) {
     std::memcpy(reinterpret_cast<void*>(copy.dst), bytes, copy.size);
     SrtNoteWrite(copy.dst, copy.size, SrtOriginRewrite);
 }
+[[maybe_unused]] const bool task_name_registered = [] {
+    {
+        Gow3Stats::NameTask(reinterpret_cast<const void*>(&RunInOrderCopy), "in-order copy");
+    }
+    return true;
+}();
 } // namespace
 
 bool HleInOrderEnabled() {
@@ -556,7 +573,15 @@ bool ExecuteScalarCopyInOrder(const Shader::Info& info, const AmdGpu::ComputePro
     const u64 count = std::min<u64>(
         {u64(cs_program.dim_x) * group_size, ud[6], src.num_records, dst.num_records});
     const u64 size = count * 4;
-    if (count == 0 || size > IN_ORDER_COPY_MAX) {
+    if (count == 0 || size > InOrderCopyMax()) {
+        static std::atomic<u64> biggest{0};
+        if (size > biggest.load(std::memory_order_relaxed)) {
+            biggest.store(size, std::memory_order_relaxed);
+            std::printf("uc3: in-order copy too big: %llu bytes (limit %u)\n",
+                        static_cast<unsigned long long>(size), InOrderCopyMax());
+        }
+        Gow3Stats::size_reject_hist[Gow3Stats::SizeBucket(size)].fetch_add(
+            1, std::memory_order_relaxed);
         return reject(2);
     }
     auto* memory = Core::Memory::Instance();
@@ -583,7 +608,9 @@ bool ExecuteScalarCopyInOrder(const Shader::Info& info, const AmdGpu::ComputePro
         !mapped || !backing || end - src.base_address < size) {
         return reject(6);
     }
-    u8 packet[sizeof(InOrderCopy) + IN_ORDER_COPY_MAX];
+    thread_local std::vector<u8> packet_buffer;
+    packet_buffer.resize(sizeof(InOrderCopy) + size);
+    u8* packet = packet_buffer.data();
     *reinterpret_cast<InOrderCopy*>(packet) = {dst.base_address, static_cast<u32>(size), 0};
     std::memcpy(packet + sizeof(InOrderCopy), backing, size);
     if (rasterizer.RunInOrder(&RunInOrderCopy, packet, static_cast<u32>(sizeof(InOrderCopy) + size))) {
@@ -600,6 +627,51 @@ bool ExecuteScalarCopyInOrder(const Shader::Info& info, const AmdGpu::ComputePro
                     static_cast<unsigned long long>(size));
     }
     return true;
+}
+
+// uc3 A4.1c: GOW3_HLE_BIG_MIN=<bytes> is the smallest copy GOW3_HLE_BIG_PIPE hands to the
+// recording thread (default 1 MB).
+unsigned long long BigPipeMin() {
+    static const unsigned long long min = [] {
+        const char* env = std::getenv("GOW3_HLE_BIG_MIN");
+        const long long v = env ? std::strtoll(env, nullptr, 10) : 0;
+        return v > 0 ? static_cast<unsigned long long>(v) : (1ull << 20);
+    }();
+    return min;
+}
+
+unsigned long long ScalarCopyBytes(const Shader::Info& info,
+                                   const AmdGpu::ComputeProgram& cs_program,
+                                   unsigned long long* dst_address) {
+    u64 group_size = 0;
+    if (info.pgm_hash == SCALAR_COPY_SHADER_HASH) {
+        group_size = 1;
+    } else if (info.pgm_hash == SCALAR_COPY64_SHADER_HASH) {
+        group_size = 64;
+    } else {
+        return 0;
+    }
+    const Shader::BufferResource* guest[2]{};
+    u32 guest_count = 0;
+    for (const auto& buffer : info.buffers) {
+        if (!buffer.IsSpecial()) {
+            if (guest_count < 2) {
+                guest[guest_count] = &buffer;
+            }
+            ++guest_count;
+        }
+    }
+    const auto ud = info.UserData();
+    if (guest_count != 2 || ud.size() <= 6) {
+        return 0;
+    }
+    const auto src = guest[0]->GetSharp(info);
+    const auto dst = guest[1]->GetSharp(info);
+    if (dst_address) {
+        *dst_address = dst.base_address;
+    }
+    return 4 * std::min<u64>({u64(cs_program.dim_x) * group_size, ud[6], src.num_records,
+                              dst.num_records});
 }
 
 bool IsGuestMemoryShaderHLE(unsigned long long pgm_hash) {

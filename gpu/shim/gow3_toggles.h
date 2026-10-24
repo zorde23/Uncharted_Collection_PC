@@ -145,6 +145,83 @@ inline std::atomic<std::uint64_t> gpu_frames{0};
 inline std::atomic<std::uint64_t> t_resident{0}, t_protect{0}, t_image_create{0}, t_refresh{0},
     t_staging{0}, t_host_wait{0}, t_copy{0}, copy_bytes{0}, t_read_faults{0}, read_faults{0},
     t_write_faults{0}, t_copy_cpu{0}, copy_sys_us{0}, copy_minflt{0}, t_gc{0}, t_readback_wait{0};
+/// uc3 (Fable A4.2b): readback commands from the command queue (count, ns), and inside the
+/// readback work on GPU-side threads: texture cache resolves (count, ns), buffer cache flushes
+/// (count, ns) split into waiting for async readbacks and recording the downloads.
+inline std::atomic<std::uint64_t> cmd_count{0}, cmd_ns{0}, resolve_count{0}, resolve_ns{0},
+    flush_count{0}, flush_ns{0}, flush_wait_ns{0}, flush_download_ns{0};
+/// uc3 (Fable A4): scalar copy sizes, bucketed (<=256, <=4K, <=64K, <=1M, >1M): copies refused
+/// by the in-order path for size, and copies handed to the recording thread (GOW3_HLE_BIG_PIPE).
+inline std::atomic<std::uint64_t> size_reject_hist[5]{}, big_pipe_hist[5]{};
+inline unsigned SizeBucket(std::uint64_t size) {
+    return size <= 256 ? 0 : size <= 4096 ? 1 : size <= 65536 ? 2 : size <= (1u << 20) ? 3 : 4;
+}
+/// uc3 (GOW3_B_CENSUS=1, diagnostic, Fable R.14): what stage B spends its time on. Tasks by
+/// function (named by the file that posts them), and how many recording kicks come from
+/// SignalAfterHostCopies.
+inline const bool b_census = [] {
+    const char* env = std::getenv("GOW3_B_CENSUS");
+    return env && env[0] == '1';
+}();
+struct TaskStat {
+    std::atomic<const void*> fn{nullptr};
+    const char* name = nullptr;
+    std::atomic<std::uint64_t> count{0}, ns{0};
+};
+inline TaskStat task_stats[16];
+inline TaskStat* TaskSlot(const void* fn) {
+    for (auto& slot : task_stats) {
+        const void* cur = slot.fn.load(std::memory_order_relaxed);
+        if (cur == fn) {
+            return &slot;
+        }
+        if (!cur) {
+            const void* expected = nullptr;
+            if (slot.fn.compare_exchange_strong(expected, fn) || expected == fn) {
+                return &slot;
+            }
+        }
+    }
+    return nullptr;
+}
+inline void NameTask(const void* fn, const char* name) {
+    if (auto* slot = TaskSlot(fn)) {
+        slot->name = name;
+    }
+}
+inline std::atomic<std::uint64_t> signal_after_copies_kicks{0};
+/// Fable R.14 D0: guest frames (OnSubmit), the shader stage B is recording (its write marks
+/// the pages it binds as written; 1 = a draw, else a dispatch's hash or a task's function),
+/// and the recorder thread: kicks, chunks and bytes per kick, kicks that woke it, time busy.
+inline std::atomic<std::uint64_t> frame_ticks{0}, diag_writer{0};
+inline std::atomic<std::uint64_t> rec_kicks{0}, rec_kick_chunks{0}, rec_kick_bytes{0},
+    rec_wakes{0}, rec_exec_ns{0};
+/// Fable R.14 D1 (GOW3_LAZY_FENCE_KICK=1, off by default): a fence handed to the recording
+/// thread no longer forces a kick. It leaves with the next kick (32 KiB, drains, waits, flip),
+/// and stage B kicks when it runs out of packets while a fence is still unkicked. D3 (GOW3_FENCE_BATCH=1,
+/// needs D1): the fences of one kick run in one closure. Counted always, printed with
+/// GOW3_B_CENSUS: kicks that carried fences (forced or natural), the fences they carried, and
+/// the kicks stage B made going idle.
+inline const bool lazy_fence_kick = [] {
+    const char* env = std::getenv("GOW3_LAZY_FENCE_KICK");
+    return env && env[0] == '1';
+}();
+inline const bool fence_batch = lazy_fence_kick && [] {
+    const char* env = std::getenv("GOW3_FENCE_BATCH");
+    return env && env[0] == '1';
+}();
+inline std::atomic<std::uint64_t> fence_kicks_forced{0}, fences_forced{0},
+    fence_kicks_natural{0}, fences_natural{0}, idle_kicks{0};
+/// Fable R.14 D4 diagnostics (GOW3_D4_DIAG=1, off by default): DmaData immediate fills to
+/// memory on the CPU or the GPU branch (and how many GPU-branch fills had their own bytes
+/// GPU-written), and why the done-window fast readback refused the faults of the GfxEop
+/// handler, NdJobWorkerThread 0 and the other threads.
+inline const bool d4_diag = [] {
+    const char* env = std::getenv("GOW3_D4_DIAG");
+    return env && env[0] == '1';
+}();
+inline std::atomic<std::uint64_t> fill_cpu{0}, fill_gpu{0}, fill_gpu_own_bytes{0};
+inline std::atomic<std::uint64_t> fast_reason[3][11]{};
 /// Diagnostics are collected only with GOW3_FRAME_STATS=1.
 inline const bool enabled = [] {
     const char* env = std::getenv("GOW3_FRAME_STATS");
