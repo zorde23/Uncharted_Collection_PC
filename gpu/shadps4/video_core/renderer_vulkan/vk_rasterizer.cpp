@@ -1764,7 +1764,9 @@ void Rasterizer::DumpOnDraw(const GraphicsPipeline* pipeline) {
     static const char* dump_trigger = std::getenv("GOW3_DUMP_TRIGGER");
     static int dump_index = 0;
     const auto* dps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
-    const char* image_list = std::getenv("GOW3_DUMP_IMAGES");
+    // uc3: read once. A getenv per draw cost ~2.2 us of stage B (v0.3.4 Cidadela 48 -> 37 FPS).
+    static const char* dump_images = std::getenv("GOW3_DUMP_IMAGES");
+    const char* image_list = dump_images;
     std::string tag_prefix;
     bool fire = false;
     if (auto& points = CaptureDumpPoints(); !points.empty() && FrameCapture::DumpFrame() != 0) {
