@@ -194,13 +194,14 @@ inline void SrtNoteLanding(u64 address, u64 size, u8 origin = SrtOriginLanding) 
     }
     SrtNoteWrite(address, size, origin);
 }
-/// uc3 R.10.17 (Fable): GOW3_A1_READBACK_STAMP=1 - GPU-written bytes landing in guest memory from
-/// a readback (buffer or image) stamp their pages. The stamp at emission says a write happened,
-/// not that it landed: a worker reading before the landing walked the old bytes.
+/// uc3 R.10.17 (Fable): GPU-written bytes landing in guest memory from a readback (buffer or
+/// image) stamp their pages. The stamp at emission says a write happened, not that it landed: a
+/// worker reading before the landing walked the old bytes. Part of A1 (on with
+/// GOW3_PREP_TRUST_A1=1); GOW3_A1_READBACK_STAMP=0 turns it off for a test.
 inline bool SrtReadbackStamp() {
     static const bool enabled = [] {
         const char* env = std::getenv("GOW3_A1_READBACK_STAMP");
-        return env && env[0] == '1';
+        return env ? std::atoi(env) != 0 : SrtA1();
     }();
     return enabled;
 }

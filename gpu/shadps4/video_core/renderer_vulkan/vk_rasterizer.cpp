@@ -52,7 +52,9 @@ enum StageBSlot : u32 {
     SbTask, SbLeaf, SbSpecial, SbDispatch, SbDraw, SbPrepare, SbBind, SbBegin, SbInputs,
     SbStamp, SbEager, SbDispHle, SbDispBind, SbDispRecord, SbBindBuffers, SbBindTextures,
     SbBindDma, SbObtain, SbInvalidate, SbAccessed, SbADraw, SbADispatch, SbAGfxPipe, SbACsPipe,
-    SbAPost, SbAPRing, SbAPCopySrc, SbAPCopyMem, SbAPCheck, SbAPLeaves, SbAPWrite, SbAPResolve, SbAPSparse, SbAPFlush, SbCount
+    SbAPost, SbAPRing, SbAPCopySrc, SbAPCopyMem, SbAPCheck, SbAPLeaves, SbAPWrite, SbAPResolve, SbAPSparse, SbAPFlush, SbRingPrep,
+    SbDrPrelude, SbDrMotion, SbDrPush, SbDrDynState, SbDrSchedBegin, SbDrRecord, SbDrDump,
+    SbDrReset, SbDrKick, SbCount
 };
 constexpr const char* stageb_names[SbCount] = {"tasks", "leaf copies", "special", "dispatch",
                                                "draw", "draw:prepare", "draw:bind",
@@ -62,10 +64,14 @@ constexpr const char* stageb_names[SbCount] = {"tasks", "leaf copies", "special"
                                                "bind:buffers", "bind:textures", "bind:dma",
                                                "buf:obtain", "buf:invalidate", "buf:accessed",
                                                "A:draw", "A:dispatch", "A:gfx pipeline",
-                                               "A:cs pipeline", "A:post", "P:ring", "P:copy flat", "P:copy mem", "P:gpu check", "P:leaf readback", "P:write", "P:resolve", "P:sparse copy", "P:flush"};
+                                               "A:cs pipeline", "A:post", "P:ring", "P:copy flat", "P:copy mem", "P:gpu check", "P:leaf readback", "P:write", "P:resolve", "P:sparse copy", "P:flush", "ring prep (any runner)",
+                                               "draw:prelude", "draw:motion", "draw:push",
+                                               "draw:dyn state", "draw:sched begin",
+                                               "draw:record", "draw:dump", "draw:reset",
+                                               "draw:kick"};
 std::atomic<u64> stageb_cycles[SbCount];
 std::atomic<u64> stageb_counts[SbCount];
-u64 ring_bytes = 0;
+std::atomic<u64> ring_bytes{0}; ///< R.12: added on the copy thread with GOW3_RING_PREP
 bool RingDedup() {
     static const bool on = [] {
         const char* value = std::getenv("GOW3_RING_DEDUP");
@@ -148,14 +154,35 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
         draw_pipe = std::make_unique<DrawPipe>(&RunDrawPacket, this);
         if (RingCopier::Wanted()) {
             ring_copier = std::make_unique<RingCopier>(
-                [](void* context, VAddr address, u8* dst, u64 size, u64 offset) {
+                [](void* context, VAddr address, const void* src, u8* dst, u64 size, u64 offset) {
                     auto* self = static_cast<Rasterizer*>(context);
-                    self->memory->CopySparseMemoryBacking(address, dst, size);
+                    if (src) {
+                        std::memcpy(dst, src, size); // R.12: a flat, from its packet or arena
+                    } else {
+                        self->memory->CopySparseMemoryBacking(address, dst, size);
+                    }
                     self->constant_ring->Flush(offset, size);
                 },
                 this);
             draw_pipe->copier = ring_copier.get();
             std::printf("gow3: constant ring copies on their own thread (R.9.12)\n");
+        }
+        // ucndc R.12 A2+A3 (Fable): GOW3_RING_PREP=1 - the copy thread checks, deduplicates and
+        // allocates each packet's constants (stage A only lists them), and copies the flats.
+        if (const char* env = std::getenv("GOW3_RING_PREP"); env && env[0] == '1') {
+            ring_prep = ring_copier && ring_copier->EnablePrep(
+                                           [](void* context, const RingCopier::PrepJob& job) {
+                                               static_cast<Rasterizer*>(context)->RunPrepJob(job);
+                                           });
+            if (!ring_prep) {
+                std::printf("Ring prep: GOW3_RING_PREP needs GOW3_RING_COPY_THREAD=1 and "
+                            "GOW3_RING_COPY_STEAL=1 (one copy thread), ignored\n");
+            } else if (const char* n = std::getenv("GOW3_RING_PREP_VERIFY"); n && n[0]) {
+                ring_prep_verify = static_cast<u32>(std::strtoul(n, nullptr, 10));
+                std::printf("Ring prep: stage B compares every %u ring bindings with guest "
+                            "memory\n",
+                            ring_prep_verify);
+            }
         }
     }
     // gow3: this thread joins the texture binding helper before it changes image state.
@@ -553,7 +580,9 @@ bool Rasterizer::RingDedupOn() {
 void Rasterizer::NoteGuestWrite(VAddr address, u64 size) {
     SrtNoteWrite(address, size, SrtOriginGuestWrite);
     if (RingDedup() && size) {
-        if (OnStageA()) {
+        if (OnStageA() && ring_prep) {
+            ring_copier->PushPrep({RingCopier::PrepKind::NoteWrite, nullptr, address, size});
+        } else if (OnStageA()) {
             DedupNoteWrite(address, size);
         } else {
             dedup_offthread.fetch_add(1, std::memory_order_release);
@@ -572,7 +601,7 @@ void Rasterizer::DedupNoteWrite(VAddr address, u64 size) {
         }
     }
     if (dedup_writes.size() >= 64) {
-        RingDedupClear();
+        RingDedupClearNow();
     } else {
         dedup_writes.push_back({address, address + size, dedup_wver});
     }
@@ -584,7 +613,11 @@ void Rasterizer::NotePendingGpuWrite(VAddr address, u64 size) {
         return;
     }
     if (RingDedup()) {
-        DedupNoteWrite(address, size);
+        if (ring_prep) {
+            ring_copier->PushPrep({RingCopier::PrepKind::NoteWrite, nullptr, address, size});
+        } else {
+            DedupNoteWrite(address, size);
+        }
     }
     // Draws write the same buffers over and over: an entry for the range only moves on.
     const u64 position = draw_pipe->Head();
@@ -697,7 +730,7 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
                 StageBTimer t{SbAPResolve};
                 memory->ResolveHostCopy(address, size);
             }
-            ring_bytes += size;
+            ring_bytes.fetch_add(size, std::memory_order_relaxed);
             if (ring_copier) {
                 // R.9.12: the copy thread copies and flushes; stage B waits for it.
                 ring_copier->Push(address, dst, size, *offset);
@@ -778,21 +811,231 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
                 }
             }
             if (clean) {
-                ++dedup_hits;
+                dedup_hits.fetch_add(1, std::memory_order_relaxed);
                 constant_ring->Pin(entry.abs);
                 out.push_back({index, static_cast<u32>(size),
                                entry.abs % ConstantRing::Capacity, address});
                 continue;
             }
-            ++dedup_stale;
+            dedup_stale.fetch_add(1, std::memory_order_relaxed);
         } else {
-            ++dedup_misses;
+            dedup_misses.fetch_add(1, std::memory_order_relaxed);
         }
         const size_t before = out.size();
         copy(index, nullptr, address, size);
         if (out.size() != before) {
             entry = {address, constant_ring->Position() - size, dedup_wver, 0,
                      static_cast<u32>(size), dedup_epoch};
+        }
+    }
+}
+
+void Rasterizer::CollectRingSlots(const Shader::Info& stage, const PreparedDraw* prepared,
+                        boost::container::static_vector<RingBinding, Shader::NUM_BUFFERS>& out,
+                        std::vector<LeafCopy>& leaves) {
+    const PreparedStage* prepared_stage = nullptr;
+    if (prepared && !Gow3Toggle::Disabled(Gow3Toggle::PreparedResources)) {
+        for (u32 i = 0; i < prepared->num_stages; ++i) {
+            const auto& candidate = prepared->stages[i];
+            if (&candidate.program->info == &stage &&
+                candidate.num_buffers == stage.buffers.size()) {
+                prepared_stage = &candidate;
+                break;
+            }
+        }
+    }
+    for (u32 index = 0; index < stage.buffers.size(); ++index) {
+        const auto& desc = stage.buffers[index];
+        if (desc.IsSpecial()) {
+            const auto flat = stage.FlatUserData();
+            if (desc.buffer_type == Shader::BufferType::Flatbuf && !flat.empty()) {
+                // The flat: copied by the copy thread from the packet (or the A1 arena); its
+                // GPU-written dwords are relative to it until the prepare places it.
+                out.push_back({index, static_cast<u32>(flat.size() * sizeof(u32)), kPrepPending,
+                               0});
+                for (const auto& leaf : stage.gpu_leaves) {
+                    leaves.push_back({leaf.dst_dw * sizeof(u32), leaf.src});
+                }
+            }
+            continue;
+        }
+        const auto vsharp = prepared_stage ? prepared_stage->buffer_sharps[index]
+                                           : desc.GetSharp(stage);
+        const VAddr address = vsharp.base_address;
+        if (address == 0 || vsharp.GetSize() == 0) {
+            continue;
+        }
+        if (desc.is_written) {
+            const u64 size = memory->ClampRangeSize(address, vsharp.GetSize());
+            NotePendingGpuWrite(address, size);
+            if (OnComputeQueue()) {
+                buffer_cache.NoteAcbWrite(address, size);
+            }
+            continue;
+        }
+        // Writes queued for stage B are stage A's to know: those buffers are bound there.
+        const u64 size = vsharp.GetSize();
+        {
+            StageBTimer check_timer{SbAPCheck};
+            if (PendingWriteOverlaps(address, size)) {
+                continue;
+            }
+        }
+        out.push_back({index, static_cast<u32>(size), kPrepPending, address});
+    }
+}
+
+void Rasterizer::RunPrepJob(const RingCopier::PrepJob& job) {
+    switch (job.kind) {
+    case RingCopier::PrepKind::Packet:
+        PrepareRingPacket(job.packet);
+        break;
+    case RingCopier::PrepKind::NoteWrite:
+        DedupNoteWrite(job.address, job.size);
+        break;
+    case RingCopier::PrepKind::DedupClear:
+        RingDedupClearNow();
+        break;
+    }
+}
+
+u64 Rasterizer::PrepCopy(VAddr address, u64 size, u64 alignment) {
+    const auto copy = [&]() -> u64 {
+        const auto offset = constant_ring->Allocate(size, alignment);
+        if (!offset) {
+            Gow3Stats::uc3_ring_full.fetch_add(1, std::memory_order_relaxed);
+            return kPrepSkipped;
+        }
+        Gow3Stats::uc3_ring_copies.fetch_add(1, std::memory_order_relaxed);
+        ring_bytes.fetch_add(size, std::memory_order_relaxed);
+        ring_copier->Push(address, constant_ring->Data(*offset), size, *offset);
+        return *offset;
+    };
+    if (!RingDedup()) {
+        return copy();
+    }
+    if (const u32 offthread = dedup_offthread.load(std::memory_order_acquire);
+        offthread != dedup_offthread_seen) {
+        dedup_offthread_seen = offthread;
+        RingDedupClearNow();
+    }
+    // As in CollectRingBindings, with 16384 entries (one writer now, the copy thread).
+    constexpr u32 Entries = 16384;
+    if (dedup_table.empty()) {
+        dedup_table.resize(Entries);
+    }
+    auto& entry = dedup_table[((address >> 4) ^ (address >> 16) ^ size) & (Entries - 1)];
+    if (entry.epoch == dedup_epoch && entry.address == address && entry.size == size) {
+        bool clean = constant_ring->Position() - entry.abs < ConstantRing::Capacity / 2;
+        if (clean && entry.wver != dedup_wver) {
+            for (const auto& write : dedup_writes) {
+                if (write.ver > entry.wver && address < write.end && write.begin < address + size) {
+                    clean = false;
+                    break;
+                }
+            }
+        }
+        if (clean) {
+            dedup_hits.fetch_add(1, std::memory_order_relaxed);
+            constant_ring->Pin(entry.abs);
+            return entry.abs % ConstantRing::Capacity;
+        }
+        dedup_stale.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        dedup_misses.fetch_add(1, std::memory_order_relaxed);
+    }
+    const u64 offset = copy();
+    if (offset != kPrepSkipped) {
+        entry = {address, constant_ring->Position() - size, dedup_wver, 0, static_cast<u32>(size),
+                 dedup_epoch};
+    }
+    return offset;
+}
+
+void Rasterizer::PrepareRingPacket(u8* data) {
+    StageBTimer prep_timer{SbRingPrep};
+    auto& packet = *reinterpret_cast<DrawPacket*>(data);
+    u8* in = data + sizeof(DrawPacket) + AlignPacket(packet.num_blocks * sizeof(u16)) +
+             packet.num_blocks * AmdGpu::RegDirty::BlockWords * sizeof(u32);
+    const u64 alignment = std::max<u64>(instance.StorageMinAlignment(),
+                                        instance.UniformMinAlignment());
+    for (u32 i = 0; i < packet.num_stages; ++i) {
+        const auto& stage = *reinterpret_cast<const PacketStage*>(in);
+        in += sizeof(PacketStage);
+        auto* bindings = reinterpret_cast<RingBinding*>(in);
+        in += stage.num_ring * sizeof(RingBinding);
+        auto* leaves = reinterpret_cast<LeafCopy*>(in);
+        in += stage.num_leaves * sizeof(LeafCopy);
+        const u32* const flat =
+            stage.flat_ext ? stage.flat_ext : reinterpret_cast<const u32*>(in) + stage.ud_size;
+        in += AlignPacket((stage.ud_size + (stage.flat_ext ? 0 : stage.flat_size)) * sizeof(u32));
+        for (u32 j = 0; j < stage.num_ring; ++j) {
+            auto& binding = bindings[j];
+            if (binding.offset != kPrepPending) {
+                continue;
+            }
+            if (binding.address == 0) {
+                // The flat. Without room, stage B reads its GPU-written dwords back into the
+                // packet's flat (it owns the caches; this thread cannot read them back).
+                const auto offset = constant_ring->Allocate(binding.size, alignment);
+                if (!offset) {
+                    Gow3Stats::uc3_ring_full.fetch_add(1, std::memory_order_relaxed);
+                    binding.offset = kPrepSkipped;
+                    continue;
+                }
+                Gow3Stats::uc3_ring_copies.fetch_add(1, std::memory_order_relaxed);
+                ring_copier->Push(0, constant_ring->Data(*offset), binding.size, *offset, flat);
+                binding.offset = *offset;
+                for (u32 k = 0; k < stage.num_leaves; ++k) {
+                    leaves[k].ring_offset += *offset;
+                }
+                continue;
+            }
+            // The stream path of BufferCache::ObtainBuffer, as in CollectRingBindings.
+            const u64 size = memory->ClampRangeSize(binding.address, binding.size);
+            {
+                StageBTimer check_timer{SbAPCheck};
+                if (size == 0 || size > VideoCore::BufferCache::STREAM_THRESHOLD ||
+                    buffer_cache.IsRegionGpuModified(binding.address, size)) {
+                    binding.offset = kPrepSkipped;
+                    continue;
+                }
+            }
+            binding.size = static_cast<u32>(size);
+            binding.offset = PrepCopy(binding.address, size, alignment);
+        }
+    }
+    packet.ring_end = constant_ring->Position();
+    DrawPipe::SetCopySeq(data, ring_copier->Enqueued());
+}
+
+void Rasterizer::VerifyRingBinding(const RingBinding& ring, const u32* flat) {
+    static std::atomic<u64> count{0};
+    if (count.fetch_add(1, std::memory_order_relaxed) % ring_prep_verify != 0) {
+        return;
+    }
+    thread_local std::vector<u8> bytes;
+    bytes.resize(ring.size);
+    if (flat) {
+        // The flat: the bytes the copy read (the packet's flat or the A1 arena).
+        std::memcpy(bytes.data(), flat, ring.size);
+    } else {
+        memory->CopySparseMemoryBacking(ring.address, bytes.data(), ring.size);
+    }
+    prep_verify_compared.fetch_add(1, std::memory_order_relaxed);
+    const u8* in_ring = constant_ring->Data(ring.offset);
+    if (std::memcmp(bytes.data(), in_ring, ring.size) != 0) {
+        const u64 differ = prep_verify_differ.fetch_add(1, std::memory_order_relaxed);
+        if (differ < 10) {
+            u32 first = 0;
+            while (first < ring.size && bytes[first] == in_ring[first]) {
+                ++first;
+            }
+            std::printf("Ring prep verify: %s %#llx (%u bytes, ring offset %#llx) differs from "
+                        "byte %u\n",
+                        flat ? "flat" : "buffer", static_cast<unsigned long long>(ring.address),
+                        ring.size,
+                        static_cast<unsigned long long>(ring.offset), first);
         }
     }
 }
@@ -863,7 +1106,11 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
             leaves.clear();
             if (constant_ring && !Gow3Toggle::Disabled(Gow3Toggle::ConstantRing)) {
                 StageBTimer ring_timer{SbAPRing};
-                CollectRingBindings(*stage, used_prepared, ring, leaves);
+                if (ring_prep) {
+                    CollectRingSlots(*stage, used_prepared, ring, leaves);
+                } else {
+                    CollectRingBindings(*stage, used_prepared, ring, leaves);
+                }
             }
             if (leaves.size() != stage->gpu_leaves.size()) {
                 // The flat is not in the ring: its GPU-written dwords are read back here.
@@ -948,7 +1195,8 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
     packet.verify = verify;
     packet.cb_extent = liverpool->last_cb_extent;
     packet.db_extent = liverpool->last_db_extent;
-    packet.ring_end = constant_ring ? constant_ring->Position() : 0;
+    // R.12: with GOW3_RING_PREP the copy thread writes it after preparing the packet.
+    packet.ring_end = constant_ring && !ring_prep ? constant_ring->Position() : 0;
     out += sizeof(DrawPacket);
     std::memcpy(out, blocks.data(), num_blocks * sizeof(u16));
     out += AlignPacket(num_blocks * sizeof(u16));
@@ -1000,6 +1248,10 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
         out += sizeof(AmdGpu::Regs);
     }
     dirty.Clear();
+    if (ring_prep) {
+        // R.12: every draw packet is prepared (its ring_end comes from there).
+        ring_copier->PushPrep({RingCopier::PrepKind::Packet, start, 0, 0});
+    }
     draw_pipe->Commit(static_cast<u32>(out - start));
     write_timer.Stop();
     PrintPipeStats();
@@ -1063,6 +1315,22 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
         in += stage.num_leaves * sizeof(LeafCopy);
         const auto* words = reinterpret_cast<const u32*>(in);
         const u32* const flat = stage.flat_ext ? stage.flat_ext : words + stage.ud_size;
+        if (stage.num_leaves && self.ring_prep) {
+            // R.12: the flat did not fit in the ring: its GPU-written dwords are read back into
+            // the packet's flat here (a leaf's ring_offset is still relative to the flat).
+            for (u32 j = 0; j < stage.num_ring; ++j) {
+                if (bindings[j].address == 0 && bindings[j].offset == kPrepSkipped) {
+                    ASSERT(!stage.flat_ext);
+                    auto* const leaves = self.ring_stages[i].leaves;
+                    for (u32 k = 0; k < stage.num_leaves; ++k) {
+                        Shader::SrtReadDword(leaves[k].src, const_cast<u32*>(flat) +
+                                                                leaves[k].ring_offset / sizeof(u32));
+                    }
+                    self.ring_stages[i].num_leaves = 0;
+                    break;
+                }
+            }
+        }
         Shader::Info::ud_snapshots[i] = {stage.info, words, stage.ud_size, flat,
                                          stage.flat_size, stage.pgm_base};
         in += AlignPacket((stage.ud_size + (stage.flat_ext ? 0 : stage.flat_size)) * sizeof(u32));
@@ -1269,16 +1537,52 @@ void Rasterizer::PrintPipeStats() {
         last_bwait = bwait;
         last_bwaits = bwaits;
         last_copy_busy = copy_busy;
+        if (ring_copier->PrepOn()) {
+            static u64 l_cycles = 0, l_packets = 0, l_backlog = 0, l_drains = 0, l_bw = 0, l_aw = 0,
+                       l_br = 0, l_ar = 0;
+            const u64 pc = ring_copier->prep_cycles.load(std::memory_order_relaxed);
+            const u64 pp = ring_copier->prep_packets.load(std::memory_order_relaxed);
+            const u64 pb = ring_copier->prep_backlog.load(std::memory_order_relaxed);
+            const u64 pd = ring_copier->prep_drains.load(std::memory_order_relaxed);
+            const u64 bw = ring_copier->b_prep_waits.load(std::memory_order_relaxed);
+            const u64 aw = ring_copier->a_prep_waits.load(std::memory_order_relaxed);
+            const u64 br = ring_copier->b_prep_runs.load(std::memory_order_relaxed);
+            const u64 ar = ring_copier->a_prep_runs.load(std::memory_order_relaxed);
+            std::printf("  ring prep: %.2f us/packet, %.0f packets/s, mean backlog %.1f; waits "
+                        "for a prepare: stage B %.0f/s, others %.0f/s; prepares run while "
+                        "waiting: stage B %.0f/s, others %.0f/s\n",
+                        pp != l_packets ? seconds * 1e6 * (pc - l_cycles) / cycles / (pp - l_packets)
+                                        : 0.0,
+                        (pp - l_packets) / seconds,
+                        pd != l_drains ? double(pb - l_backlog) / (pd - l_drains) : 0.0,
+                        (bw - l_bw) / seconds, (aw - l_aw) / seconds, (br - l_br) / seconds,
+                        (ar - l_ar) / seconds);
+            l_br = br;
+            l_ar = ar;
+            l_cycles = pc;
+            l_packets = pp;
+            l_backlog = pb;
+            l_drains = pd;
+            l_bw = bw;
+            l_aw = aw;
+            if (ring_prep_verify || prep_pending_seen.load(std::memory_order_relaxed)) {
+                std::printf("  ring prep verify: %llu compared, %llu differ, %llu pending seen\n",
+                            static_cast<unsigned long long>(prep_verify_compared.load()),
+                            static_cast<unsigned long long>(prep_verify_differ.load()),
+                            static_cast<unsigned long long>(prep_pending_seen.load()));
+            }
+        }
     }
     if (StageBProfile()) {
+        const u64 bytes = ring_bytes.exchange(0, std::memory_order_relaxed);
         std::printf("  constant ring: %.1f MB/s, %.0f copies/s, %.0f bytes/copy\n",
-                    ring_bytes / seconds / 1e6, stageb_counts[SbAPSparse] / seconds,
-                    stageb_counts[SbAPSparse] ? double(ring_bytes) / stageb_counts[SbAPSparse] : 0.0);
-        ring_bytes = 0;
+                    bytes / seconds / 1e6, stageb_counts[SbAPSparse] / seconds,
+                    stageb_counts[SbAPSparse] ? double(bytes) / stageb_counts[SbAPSparse] : 0.0);
         if (RingDedup()) {
             std::printf("  ring dedup: %.0f hits/s, %.0f misses/s, %.0f stale/s\n",
-                        dedup_hits / seconds, dedup_misses / seconds, dedup_stale / seconds);
-            dedup_hits = dedup_misses = dedup_stale = 0;
+                        dedup_hits.exchange(0, std::memory_order_relaxed) / seconds,
+                        dedup_misses.exchange(0, std::memory_order_relaxed) / seconds,
+                        dedup_stale.exchange(0, std::memory_order_relaxed) / seconds);
         }
         {
             extern std::atomic<u64> g_gow3_gfx_pipe_split[11];
@@ -1303,13 +1607,13 @@ void Rasterizer::PrintPipeStats() {
                             us * values, us * apply, us * apply_copy, us * apply_find);
             }
         }
-        std::printf("  stage B by step (%% of time, us/call):");
+        std::printf("  stage B by step (%% of time, us/call, k calls/s):");
         for (u32 i = 0; i < SbCount; ++i) {
             const u64 c = stageb_cycles[i].exchange(0, std::memory_order_relaxed);
             const u64 n = stageb_counts[i].exchange(0, std::memory_order_relaxed);
             if (n) {
-                std::printf(" %s %.1f%% %.2f", stageb_names[i], 100.0 * c / cycles,
-                            seconds * 1e6 * c / cycles / n);
+                std::printf(" %s %.1f%% %.2f %.1fk", stageb_names[i], 100.0 * c / cycles,
+                            seconds * 1e6 * c / cycles / n, n / seconds / 1000.0);
             }
         }
         std::printf("\n");
@@ -1435,6 +1739,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* pre
 
 void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw* used_prepared,
                             bool is_indexed, u32 index_offset) {
+    StageBTimer prelude_timer{SbDrPrelude};
     if (DrawPipe::OnStageB()) {
         FrameCapture::Poll();
         scheduler.PopPendingOperations();
@@ -1466,6 +1771,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     motion_draw = pipeline->GetGraphicsKey().motion_vectors;
     motion_geometry = 0;
 
+    prelude_timer.Stop();
     {
         StageBTimer timer{SbPrepare};
         PrepareRenderState(pipeline);
@@ -1514,6 +1820,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         }
     }
 
+    StageBTimer motion_timer{SbDrMotion};
     // gow3: screen-space (clip disabled) draws into the upscaler's output-size images.
     push_data.xscale *= target_scale[0];
     push_data.xoffset *= target_scale[0];
@@ -1601,7 +1908,10 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             });
         }
     }
+    motion_timer.Stop();
+    StageBTimer push_timer{SbDrPush};
     pipeline->BindResources(set_writes, push_data);
+    push_timer.Stop();
     // gow3: jitter geometry drawn with the scene depth, not full-screen passes (a shifted
     // full-screen quad leaves an edge column unwritten).
     draw_jitter = {};
@@ -1609,9 +1919,14 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         (regs.num_indices > 6 || regs.num_instances.NumInstances() > 1)) {
         draw_jitter = upscaler->Jitter();
     }
+    StageBTimer dyn_timer{SbDrDynState};
     UpdateDynamicState(pipeline, is_indexed);
     MarkPass(pipeline, state);
+    dyn_timer.Stop();
+    StageBTimer begin_timer{SbDrSchedBegin};
     scheduler.BeginRendering(state);
+    begin_timer.Stop();
+    StageBTimer record_timer{SbDrRecord};
 
     const auto& vs_info = pipeline->GetStage(Shader::SwStage::Vertex);
     const auto& fetch_shader = pipeline->GetFetchShader();
@@ -1639,6 +1954,8 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             draw();
         }
     });
+    record_timer.Stop();
+    StageBTimer dump_timer{SbDrDump};
     if (FrameCapture::Active()) {
         const auto* ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
         FrameCapture::Draw(vs_info.pgm_hash, ps ? ps->pgm_hash : 0, num_indices, num_instances);
@@ -1661,8 +1978,13 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     DebugState.IncDrawCall();
     DumpOnDraw(pipeline);
     SamplerLog(pipeline);
+    dump_timer.Stop();
 
-    ResetBindings(false);
+    {
+        StageBTimer timer{SbDrReset};
+        ResetBindings(false);
+    }
+    StageBTimer kick_timer{SbDrKick};
     scheduler.KickRecording();
 }
 
@@ -3059,6 +3381,13 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                                          std::min<u64>(ring->size, bytes.size()));
                 FrameCapture::Buffer(stage.pgm_hash, buffer_index, ring->address, bytes.data(),
                                      ring->size);
+            }
+            if (ring_prep_verify) {
+                if (ring->address != 0) {
+                    VerifyRingBinding(*ring, nullptr);
+                } else if (stage.FlatUserData().size() * sizeof(u32) >= ring->size) {
+                    VerifyRingBinding(*ring, stage.FlatUserData().data());
+                }
             }
             if (!desc.IsSpecial()) {
                 if (ring->size == 864 && gbuffer_draw &&

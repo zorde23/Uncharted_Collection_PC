@@ -74,6 +74,7 @@ public:
         pending_size = size;
         auto* header = reinterpret_cast<Header*>(ring.get() + at % Capacity);
         header->size = size;
+        header->copy_seq = AllCopies; // R.12: the prepare sets it for a prepared packet
         return reinterpret_cast<u8*>(header + 1);
     }
 
@@ -81,7 +82,12 @@ public:
     void Commit(u32 payload_size) {
         auto* header = reinterpret_cast<Header*>(ring.get() + head % Capacity);
         header->payload = payload_size;
-        header->copy_seq = copier ? copier->Enqueued() : 0;
+        if (copier && copier->PrepOn()) {
+            // R.12: copy_seq is the prepare's to write (it may have already).
+            header->prep_seq = copier->PrepEnqueued();
+        } else {
+            header->copy_seq = copier ? copier->Enqueued() : 0;
+        }
         head += pending_size;
         published.store(head, std::memory_order_seq_cst);
         ++packets;
@@ -151,12 +157,20 @@ public:
     /// before it are done.
     RingCopier* copier = nullptr;
 
+    /// R.12, the copy thread: the ring copies queued up to the end of the prepare of the packet
+    /// whose payload starts at `payload`.
+    static void SetCopySeq(u8* payload, u64 seq) noexcept {
+        reinterpret_cast<Header*>(payload)[-1].copy_seq = seq;
+    }
+
 private:
     struct Header {
         u32 size;    ///< bytes to the next packet (0: wrap to the ring start)
         u32 payload; ///< bytes written by the producer
         u64 copy_seq; ///< R.9.12: ring copies queued before this packet
+        u64 prep_seq; ///< R.12: prepare jobs queued up to this packet
     };
+    static constexpr u64 AllCopies = ~0ull; ///< R.12: not prepared: every copy queued so far
     static constexpr u64 Capacity = 16ull << 20;
 
     static constexpr u32 Align(u32 size) {
@@ -212,7 +226,14 @@ private:
                 continue;
             }
             if (copier) {
-                copier->WaitDone(header->copy_seq, true);
+                if (copier->PrepOn()) {
+                    // R.12: the prepare first; copy_seq is read after it.
+                    copier->WaitPrepared(header->prep_seq, true);
+                    const u64 seq = header->copy_seq;
+                    copier->WaitDone(seq == AllCopies ? copier->Enqueued() : seq, true);
+                } else {
+                    copier->WaitDone(header->copy_seq, true);
+                }
             }
             const u64 start = __rdtsc();
             processing_end = at + header->size;

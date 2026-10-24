@@ -465,13 +465,14 @@ static bool A1PendingCheck() {
     }();
     return on;
 }
-// uc3 R.10.17 (Fable): GOW3_A1_STRICT_VALUE=1 - by value only with clean pages: a page the walks
-// read, written since the snapshot (even outside the ranges read), is a miss after a global
-// stamp or a wait instead of a value compare.
+// uc3 R.10.17 (Fable): by value only with clean pages: a page the walks read, written since the
+// snapshot (even outside the ranges read), is a miss after a global stamp or a wait instead of a
+// value compare. Part of A1 (on with GOW3_PREP_TRUST_A1=1); GOW3_A1_STRICT_VALUE=0 turns it off
+// for a test.
 static bool A1StrictValue() {
     static const bool on = [] {
         const char* env = std::getenv("GOW3_A1_STRICT_VALUE");
-        return env && env[0] == '1';
+        return env ? std::atoi(env) != 0 : SrtA1();
     }();
     return on;
 }
@@ -900,10 +901,10 @@ const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& p
     // worker's walk and no write to the pages it read (nor a wait, nor a big write) since its
     // snapshot, the worker's flattened user data stands: no shader footer search and no SRT
     // walk here. =2 is the shadow mode: the regular check runs and is compared with what trust
-    // would have used.
+    // would have used. Unset, GOW3_PREP_TRUST_A1=1 alone turns trust on (the launcher option).
     static const int trust_mode = [] {
         const char* env = std::getenv("GOW3_PREP_TRUST");
-        return env ? std::atoi(env) : 0;
+        return env ? std::atoi(env) : (SrtA1() ? 1 : 0);
     }();
     bool trusted = false;
     static_assert(SrtNumOrigins <= 8);

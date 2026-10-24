@@ -155,6 +155,19 @@ public:
     }
     static bool RingDedupOn();
     void RingDedupClear() noexcept {
+        if (ring_prep) {
+            // R.12: the dedup state belongs to the copy thread: queued in order from stage A,
+            // counted from anywhere else (the prepare forgets it on its next look).
+            if (OnStageA()) {
+                ring_copier->PushPrep({RingCopier::PrepKind::DedupClear, nullptr, 0, 0});
+            } else {
+                dedup_offthread.fetch_add(1, std::memory_order_release);
+            }
+            return;
+        }
+        RingDedupClearNow();
+    }
+    void RingDedupClearNow() noexcept {
         ++dedup_epoch;
         dedup_writes.clear();
     }
@@ -303,6 +316,19 @@ private:
     void CollectRingBindings(const Shader::Info& stage, const PreparedDraw* prepared,
                              boost::container::static_vector<RingBinding, Shader::NUM_BUFFERS>& out,
                              std::vector<LeafCopy>& leaves);
+    /// R.12 (GOW3_RING_PREP=1), stage A: lists the stage's ring candidates in the packet for the
+    /// copy thread (offset kPrepPending) and notes the buffers the stage writes.
+    void CollectRingSlots(const Shader::Info& stage, const PreparedDraw* prepared,
+                          boost::container::static_vector<RingBinding, Shader::NUM_BUFFERS>& out,
+                          std::vector<LeafCopy>& leaves);
+    /// R.12, the copy thread: checks, deduplicates, allocates and queues the copies of a packet.
+    void PrepareRingPacket(u8* packet);
+    void RunPrepJob(const RingCopier::PrepJob& job);
+    /// R.12, the copy thread: a ring offset for a copy of guest [address, +size), or kPrepSkipped.
+    u64 PrepCopy(VAddr address, u64 size, u64 alignment);
+    /// R.12 (GOW3_RING_PREP_VERIFY=N), stage B: every Nth ring binding against guest memory,
+    /// or a flat against the packet's flat (`flat`, not null for the flat binding).
+    void VerifyRingBinding(const RingBinding& ring, const u32* flat);
     /// Stage B: the GPU copies of the packet's GPU-written flat dwords into the ring.
     void RecordLeafCopies();
     void PrintPipeStats();
@@ -542,6 +568,14 @@ private:
     bool pipe_synced = false;
     std::array<AmdGpu::CbDbExtent, AmdGpu::NUM_COLOR_BUFFERS> pipe_cb_extent{};
     AmdGpu::CbDbExtent pipe_db_extent{};
+    /// R.12: RingBinding::offset of a slot the copy thread has not prepared yet / did not put in
+    /// the ring (stage B binds that buffer as without the ring).
+    static constexpr u64 kPrepPending = ~0ull;
+    static constexpr u64 kPrepSkipped = ~1ull;
+    bool ring_prep = false; ///< R.12: GOW3_RING_PREP=1 is on
+    u32 ring_prep_verify = 0;
+    std::atomic<u64> prep_verify_compared{0}, prep_verify_differ{0};
+    mutable std::atomic<u64> prep_pending_seen{0};
     /// Stage A: small read-only guest buffers copied into the constant ring for a packet.
     struct RingBinding {
         u32 index;  ///< buffer resource of the stage
@@ -584,7 +618,8 @@ private:
     /// dedup_writes from there, so it counts them and forgets the dedup state on its next look.
     std::atomic<u32> dedup_offthread{0};
     u32 dedup_offthread_seen = 0;
-    u64 dedup_hits = 0, dedup_misses = 0, dedup_stale = 0;
+    /// R.12: written by the copy thread with GOW3_RING_PREP, read and zeroed on stage A.
+    std::atomic<u64> dedup_hits{0}, dedup_misses{0}, dedup_stale{0};
     VAddr pending_min = ~VAddr{0}, pending_max = 0; ///< bounds of pending_writes
     u32 pending_checks = 0;
     u64 proxy_samples = 0; ///< texture bindings that read a scene proxy (statistics)
@@ -613,9 +648,20 @@ private:
         for (u32 i = 0; i < num_ring_stages; ++i) {
             if (ring_stages[i].info == &stage) {
                 for (u32 j = 0; j < ring_stages[i].count; ++j) {
-                    if (ring_stages[i].bindings[j].index == index) {
-                        return &ring_stages[i].bindings[j];
+                    const auto& binding = ring_stages[i].bindings[j];
+                    if (binding.index != index) {
+                        continue;
                     }
+                    if (binding.offset == kPrepSkipped) {
+                        return nullptr; // R.12: not in the ring
+                    }
+                    if (binding.offset == kPrepPending) [[unlikely]] {
+                        // R.12: stage B waited for the prepare, so this is a bug: bound as
+                        // without the ring, and counted (GOW3_RING_PREP_VERIFY prints it).
+                        prep_pending_seen.fetch_add(1, std::memory_order_relaxed);
+                        return nullptr;
+                    }
+                    return &binding;
                 }
                 return nullptr;
             }

@@ -7,6 +7,15 @@
 // before. Guest memory writes stage A makes itself (MemSemaphore signal, DumpConstRam) first
 // wait for every queued copy (Rasterizer::WaitRingCopies); writes handed to stage B
 // (RunInOrder) run after their packet's wait, and other packets drain stage B first.
+//
+// ucndc R.12 A2+A3 (Fable, GOW3_RING_PREP=1, needs GOW3_RING_COPY_STEAL=1): stage A no longer
+// checks, deduplicates or allocates the constants of a packet: it queues the packet on an
+// ordered prepare queue and this thread does that work (Rasterizer::PrepareRingPacket), queuing
+// the copies on the stealable queue. Stage B waits for the prepare, then for the copies.
+// R.12b (Fable): prepares are claimed in order like the copies, so a thread waiting for one
+// (stage B right after a drain, stage A with a full queue) runs it itself instead of waking the
+// copy thread and waiting; job n runs only once job n - 1 is done (prepared == n), which also
+// hands the dedup table and the constant ring from one thread to the next.
 
 #pragma once
 
@@ -28,8 +37,20 @@ namespace Vulkan {
 
 class RingCopier {
 public:
-    /// Copies `size` bytes of guest memory at `address` to `dst` (ring offset `offset`).
-    using CopyFn = void (*)(void* context, VAddr address, u8* dst, u64 size, u64 offset);
+    /// Copies `size` bytes of guest memory at `address` (or from `src` when not null) to `dst`
+    /// (ring offset `offset`).
+    using CopyFn = void (*)(void* context, VAddr address, const void* src, u8* dst, u64 size,
+                            u64 offset);
+
+    /// R.12: a job of the prepare queue, run in order by the copy thread.
+    enum class PrepKind : u32 { Packet, NoteWrite, DedupClear };
+    struct PrepJob {
+        PrepKind kind;
+        u8* packet;    ///< Packet: the packet in the draw pipe
+        VAddr address; ///< NoteWrite
+        u64 size;
+    };
+    using PrepFn = void (*)(void* context, const PrepJob& job);
 
     RingCopier(CopyFn fn_, void* context_) : fn{fn_}, context{context_} {
         jobs = std::make_unique<Job[]>(Capacity);
@@ -82,13 +103,13 @@ public:
         return on;
     }
 
-    /// Stage A: queues a copy.
-    void Push(VAddr address, u8* dst, u64 size, u64 offset) {
+    /// Stage A (the copy thread with GOW3_RING_PREP): queues a copy.
+    void Push(VAddr address, u8* dst, u64 size, u64 offset, const void* src = nullptr) {
         if (steal) {
             if (head >= Capacity) {
                 WaitDone(head - Capacity + 1);
             }
-            jobs[head % Capacity] = {address, dst, size, offset};
+            jobs[head % Capacity] = {address, src, dst, size, offset};
             ++head;
             enqueued.store(head, std::memory_order_seq_cst);
             if (sleeping.load(std::memory_order_seq_cst) != 0 &&
@@ -104,7 +125,7 @@ public:
         while (head >= Capacity && !IsDone(head - Capacity + 1)) {
             __builtin_ia32_pause();
         }
-        jobs[head % Capacity] = {address, dst, size, offset};
+        jobs[head % Capacity] = {address, src, dst, size, offset};
         ++head;
         enqueued.store(head, std::memory_order_seq_cst);
         if (sleeping.load(std::memory_order_seq_cst) != 0) {
@@ -176,9 +197,85 @@ public:
         (stage_b ? b_waits : waits).fetch_add(1, std::memory_order_relaxed);
     }
 
-    /// Any thread: waits for every copy queued so far.
+    /// Any thread: waits for every copy queued so far (with GOW3_RING_PREP, for every packet
+    /// queued so far to be prepared first).
     void WaitAll() {
+        if (PrepOn()) {
+            WaitPrepared(prep_enqueued.load(std::memory_order_acquire));
+        }
         WaitDone(Enqueued());
+    }
+
+    /// R.12: turns the prepare queue on (before the first packet). Needs the STEAL mode.
+    bool EnablePrep(PrepFn fn_) {
+        if (!steal) {
+            return false;
+        }
+        prep_jobs = std::make_unique<PrepJob[]>(PrepCapacity);
+        if (const char* n = std::getenv("GOW3_RING_PREP_WAKE_N"); n && n[0]) {
+            prep_wake_n = std::max<u64>(1, std::strtoull(n, nullptr, 10));
+        }
+        if (const char* n = std::getenv("GOW3_RING_PREP_SPIN_US"); n && n[0]) {
+            prep_spin_us = static_cast<u32>(std::strtoul(n, nullptr, 10));
+        }
+        prep_fn = fn_;
+        prep_on.store(true, std::memory_order_seq_cst);
+        std::printf("Ring prep: the copy thread prepares the constants of each packet (R.12); it "
+                    "spins %u us before sleeping and stage A wakes it at %llu packets\n",
+                    prep_spin_us, static_cast<unsigned long long>(prep_wake_n));
+        return true;
+    }
+
+    [[nodiscard]] bool PrepOn() const noexcept {
+        return prep_on.load(std::memory_order_acquire);
+    }
+
+    /// R.12, stage A: queues a prepare job.
+    void PushPrep(const PrepJob& job) {
+        if (prep_head - prepared.load(std::memory_order_acquire) >= PrepCapacity) {
+            WaitPrepared(prep_head - PrepCapacity + 1);
+        }
+        prep_jobs[prep_head % PrepCapacity] = job;
+        ++prep_head;
+        prep_enqueued.store(prep_head, std::memory_order_seq_cst);
+        if (sleeping.load(std::memory_order_seq_cst) != 0 &&
+            prep_head - prep_claim.load(std::memory_order_seq_cst) >= prep_wake_n &&
+            !woken.exchange(true, std::memory_order_seq_cst)) {
+            notifies.fetch_add(1, std::memory_order_relaxed);
+            wake.fetch_add(1, std::memory_order_seq_cst);
+            wake.notify_all();
+        }
+    }
+
+    /// R.12, stage A: prepare jobs queued so far (a packet's prepare sequence number).
+    [[nodiscard]] u64 PrepEnqueued() const noexcept {
+        return prep_head;
+    }
+
+    /// R.12, any thread: waits until the first `seq` prepare jobs ran, waking the copy thread
+    /// if it sleeps (the waiter count keeps it from going to sleep meanwhile).
+    void WaitPrepared(u64 seq, bool stage_b = false) {
+        if (prepared.load(std::memory_order_acquire) >= seq) {
+            return;
+        }
+        const u64 start = __rdtsc();
+        prep_waiters.fetch_add(1, std::memory_order_seq_cst);
+        for (u32 spins = 0; prepared.load(std::memory_order_acquire) < seq;) {
+            // R.12b: run the next unclaimed prepare below seq; when all are claimed, the
+            // threads running them finish them in order.
+            if (RunPrep(seq)) {
+                (stage_b ? b_prep_runs : a_prep_runs).fetch_add(1, std::memory_order_relaxed);
+                continue;
+            }
+            if (spins++ < 4096) {
+                __builtin_ia32_pause();
+            } else {
+                std::this_thread::yield();
+            }
+        }
+        prep_waiters.fetch_sub(1, std::memory_order_seq_cst);
+        (stage_b ? b_wait_cycles : wait_cycles).fetch_add(__rdtsc() - start, std::memory_order_relaxed);
+        (stage_b ? b_prep_waits : a_prep_waits).fetch_add(1, std::memory_order_relaxed);
     }
 
     /// Statistics: cycles spent waiting for copies (and how many waits), cycles copying.
@@ -188,15 +285,23 @@ public:
     /// stage B and the others spent copying (part of their wait), sleeps and wakes.
     std::atomic<u64> thread_copies{0}, b_copies{0}, a_copies{0};
     std::atomic<u64> b_copy_cycles{0}, a_copy_cycles{0}, sleeps{0}, notifies{0};
+    /// R.12: cycles the copy thread spent preparing, packets prepared, the prepare backlog
+    /// summed at each drain (and the drains), waits for a prepare by stage B and the others.
+    std::atomic<u64> prep_cycles{0}, prep_packets{0}, prep_backlog{0}, prep_drains{0};
+    std::atomic<u64> b_prep_waits{0}, a_prep_waits{0};
+    /// R.12b: prepare jobs run by stage B / the others while waiting.
+    std::atomic<u64> b_prep_runs{0}, a_prep_runs{0};
 
 private:
     struct Job {
         VAddr address;
+        const void* src; ///< R.12: memcpy source (the flat), null for guest memory
         u8* dst;
         u64 size;
         u64 offset;
     };
     static constexpr u64 Capacity = 1ull << 16;
+    static constexpr u64 PrepCapacity = 1ull << 15;
     static constexpr u32 MaxThreads = 4;
 
     static u32 SpinMicros() {
@@ -228,12 +333,38 @@ private:
         }
     }
 
+    /// R.12b: claims the next unclaimed prepare job below `limit` (and below what was queued),
+    /// waits until the jobs before it are done and runs it. False when there is none to claim.
+    bool RunPrep(u64 limit) {
+        u64 n = prep_claim.load(std::memory_order_seq_cst);
+        while (true) {
+            const u64 end = std::min(limit, prep_enqueued.load(std::memory_order_seq_cst));
+            if (n >= end) {
+                return false;
+            }
+            if (prep_claim.compare_exchange_weak(n, n + 1, std::memory_order_seq_cst)) {
+                break;
+            }
+        }
+        while (prepared.load(std::memory_order_seq_cst) != n) {
+            __builtin_ia32_pause();
+        }
+        const u64 c0 = __rdtsc();
+        const PrepJob& job = prep_jobs[n % PrepCapacity];
+        const bool packet = job.kind == PrepKind::Packet;
+        prep_fn(context, job);
+        prepared.store(n + 1, std::memory_order_seq_cst);
+        prep_packets.fetch_add(packet, std::memory_order_relaxed);
+        prep_cycles.fetch_add(__rdtsc() - c0, std::memory_order_relaxed);
+        return true;
+    }
+
     /// GOW3_RING_COPY_STEAL: runs claimed copy `n`, then moves done_prefix past every copy
     /// finished in order. A copy finished out of order is picked up either by the thread that
     /// moves the prefix up to it or by its own thread re-reading the prefix (both seq_cst).
     void RunJob(u64 n) {
         const Job& job = jobs[n % Capacity];
-        fn(context, job.address, job.dst, job.size, job.offset);
+        fn(context, job.address, job.src, job.dst, job.size, job.offset);
         finished[n % Capacity].store(n + 1, std::memory_order_seq_cst);
         u64 p = done_prefix.load(std::memory_order_seq_cst);
         while (finished[p % Capacity].load(std::memory_order_seq_cst) == p + 1) {
@@ -284,30 +415,58 @@ private:
     void RunSteal(std::stop_token stop) {
         Common::SetCurrentThreadName("gow3:RingCopy0");
         // The waiters run the copies they need, so by default the thread sleeps right after draining.
-        const u32 spin_us = std::getenv("GOW3_RING_COPY_SPIN_US") ? SpinMicros() : 0;
+        // R.12: with the prepare queue it spins GOW3_RING_PREP_SPIN_US (20) first: packets come
+        // every few microseconds inside a frame.
+        const bool copy_spin = std::getenv("GOW3_RING_COPY_SPIN_US") != nullptr;
         auto report_at = std::chrono::steady_clock::now() + std::chrono::seconds(5);
         while (!stop.stop_requested()) {
             if (std::chrono::steady_clock::now() >= report_at) {
                 report_at = ReportSteal();
             }
+            if (PrepOn()) {
+                // R.12c: strict order per packet. One prepare, then the copies it (and the ones
+                // before it) queued, so stage B finds packet n prepared and copied before the
+                // thread moves on to n+1.
+                const u64 p = prep_claim.load(std::memory_order_seq_cst);
+                const u64 end = prep_enqueued.load(std::memory_order_acquire);
+                if (p < end) {
+                    const u64 c0 = __rdtsc();
+                    prep_backlog.fetch_add(end - p, std::memory_order_relaxed);
+                    prep_drains.fetch_add(1, std::memory_order_relaxed);
+                    if (RunPrep(NoJob)) {
+                        const u64 upto = Enqueued();
+                        u64 count = 0;
+                        for (u64 m; (m = Claim(upto)) != NoJob; ++count) {
+                            RunJob(m);
+                        }
+                        thread_copies.fetch_add(count, std::memory_order_relaxed);
+                    }
+                    busy_cycles.fetch_add(__rdtsc() - c0, std::memory_order_relaxed);
+                    continue;
+                }
+            }
             const u64 start = __rdtsc();
             if (const u64 n = Claim(NoJob); n != NoJob) {
                 RunJob(n);
                 u64 count = 1;
-                for (u64 m; (m = Claim(NoJob)) != NoJob; ++count) {
+                // R.12: back to the prepare queue as soon as a packet waits there.
+                for (u64 m; !PrepPending() && (m = Claim(NoJob)) != NoJob; ++count) {
                     RunJob(m);
                 }
                 thread_copies.fetch_add(count, std::memory_order_relaxed);
                 busy_cycles.fetch_add(__rdtsc() - start, std::memory_order_relaxed);
                 continue;
             }
+            // EnablePrep comes after this thread started: read the spin here.
+            const u32 spin_us = copy_spin ? SpinMicros() : PrepOn() ? prep_spin_us : 0;
             const auto spin_until =
                 std::chrono::steady_clock::now() + std::chrono::microseconds(spin_us);
             bool found = false;
             for (u32 spins = 1; spin_us != 0 && !stop.stop_requested(); ++spins) {
                 __builtin_ia32_pause();
                 if (claim.load(std::memory_order_seq_cst) <
-                    enqueued.load(std::memory_order_seq_cst)) {
+                        enqueued.load(std::memory_order_seq_cst) ||
+                    PrepPending()) {
                     found = true;
                     break;
                 }
@@ -322,15 +481,27 @@ private:
             sleep_at.store(claim.load(std::memory_order_seq_cst), std::memory_order_seq_cst);
             woken.store(false, std::memory_order_seq_cst);
             sleeping.fetch_add(1, std::memory_order_seq_cst);
-            // Unclaimed copies are left to the waiters until wake_n of them pile up.
+            // Unclaimed copies are left to the waiters until wake_n of them pile up. R.12:
+            // prepares wait until prep_wake_n of them pile up or someone waits for one.
             if (enqueued.load(std::memory_order_seq_cst) - sleep_at.load(std::memory_order_seq_cst) <
                     wake_n &&
+                (!PrepOn() ||
+                 (prep_enqueued.load(std::memory_order_seq_cst) -
+                          prep_claim.load(std::memory_order_seq_cst) <
+                      prep_wake_n &&
+                  prep_waiters.load(std::memory_order_seq_cst) == 0)) &&
                 !stop.stop_requested()) {
                 sleeps.fetch_add(1, std::memory_order_relaxed);
                 wake.wait(seen, std::memory_order_seq_cst);
             }
             sleeping.fetch_sub(1, std::memory_order_seq_cst);
         }
+    }
+
+    /// R.12: a prepare job is waiting.
+    bool PrepPending() const noexcept {
+        return PrepOn() && prep_claim.load(std::memory_order_relaxed) <
+                               prep_enqueued.load(std::memory_order_acquire);
     }
 
     /// Thread `index` runs copies index, index + N, ...
@@ -369,7 +540,7 @@ private:
             const u64 start = __rdtsc();
             while (at < available) {
                 const Job& job = jobs[at % Capacity];
-                fn(context, job.address, job.dst, job.size, job.offset);
+                fn(context, job.address, job.src, job.dst, job.size, job.offset);
                 at += step;
                 done[index].value.store(++count, std::memory_order_release);
             }
@@ -397,6 +568,17 @@ private:
     alignas(64) std::atomic<u64> done_prefix{0};
     alignas(64) std::atomic<u64> sleep_at{0};
     std::atomic<bool> woken{false}; ///< a producer already woke the sleeping copy thread
+    // R.12 prepare queue: stage A pushes, the copy thread runs in order
+    std::atomic<bool> prep_on{false};
+    PrepFn prep_fn = nullptr;
+    std::unique_ptr<PrepJob[]> prep_jobs;
+    u64 prep_head = 0; ///< stage A
+    u64 prep_wake_n = 1; ///< R.12b: wake at the first prepare (one wake per sleep)
+    u32 prep_spin_us = 20;
+    alignas(64) std::atomic<u64> prep_enqueued{0};
+    alignas(64) std::atomic<u64> prepared{0};
+    alignas(64) std::atomic<u64> prep_claim{0}; ///< R.12b: next prepare job to claim
+    alignas(64) std::atomic<u32> prep_waiters{0};
     // ReportSteal state (copy thread only)
     std::chrono::steady_clock::time_point report_last{};
     u64 report_tsc = 0;
