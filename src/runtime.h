@@ -121,7 +121,8 @@ void runtime_thread_attach_host(const char *name);
  * any byte; it must match exactly once in the executable code (and `require` at match+require_at,
  * when given). `moved` bytes of whole position-independent instructions move to the thunk. The
  * callback gets the guest's rdi, rsi and r14 there (instead of r14: rdx when `rdx` is 1, the return
- * address when it is 2) and the image base. */
+ * address when it is 2, the guest's rbx when it is 3, r12 when it is 4, the thunk's saved registers when it is 5: guest r9
+ * at +0x18, the return address at +0x48, stack arguments from +0x50) and the image base. */
 typedef struct {
     const char *name, *pattern;
     size_t moved;
@@ -131,10 +132,21 @@ typedef struct {
     int rdx;
 } RuntimeGuestCallback;
 const RuntimeGuestCallback *runtime_guest_callbacks(size_t *count);
+/* GOW3_MOUSE_U1_CALL98 (probe.c): a "call *0x98(%reg)" at image offset `site` is about to call `target` */
+void __attribute__((ms_abi)) runtime_call98_seen(uint64_t rdi, uint64_t rsi, uint64_t site, uint64_t target);
+extern volatile uint64_t runtime_image_base;
+/* rdx 6: as 5, and the guest's r14 in runtime_guest_r14 (one thread at a time) */
+extern volatile uint64_t runtime_guest_r14;
 /* The guest's rbp at the last call of a callback whose `rdx` is 2 (diagnostics: its frame chain). */
 extern volatile uint64_t runtime_guest_rbp;
 /* The return address at the last call of any callback (diagnostics; threads may race). */
 extern volatile uint64_t runtime_guest_ret;
+#ifdef _WIN32
+/* GOW3_MOUSE_AIM_WATCH: write watchpoints (this thread) on two 8-byte fields, counted per writing
+ * instruction; on=0 stops counting and the report prints and clears the counts (probe.c). */
+void runtime_aim_watch(uint64_t at0, uint64_t at1, int on);
+void runtime_aim_watch_report(const char *what);
+#endif
 /* 1 when input.ini turns mouse look on and GOW3_MOUSE_CAMERA is not 0: the loader installs the
  * mouse camera callbacks. */
 int runtime_pad_mouse_camera(void);

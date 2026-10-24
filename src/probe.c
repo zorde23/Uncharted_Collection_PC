@@ -321,9 +321,21 @@ static void cbw_install(uint64_t image_size) {
  * of member functions (eboot+0x94a350), and the entry it read had type 0, which has no handler
  * (the list says 5 entries; the 5th started with zeros). Instead of the crash the thread waits a
  * few ms for the entry to be written and runs it again; if it still has no handler it skips it
- * (one binding missing for one draw). The list is printed, at the fault and after the wait. */
+ * (one binding missing for one draw). The list is printed, at the fault and after the wait.
+ * Third crash (2026-10-23, last_run 16): entry 4 held floats/half-floats, type 0x255c, far past the
+ * table, so the "handler" was float data and the call faulted on a non-canonical address at the
+ * call itself (0x64011d, read of ffffffffffffffff). That case (and a call into unmapped memory) is
+ * handled the same way; a type counts as having a handler only below 0x100 with a pointer into the
+ * executable (or a small odd one, a virtual function's offset). */
 static unsigned char *ubr_loop;
+static uint64_t ubr_image_size;
 static LONG ubr_count;
+static int ubr_valid(const uint64_t *table, uint16_t type) {
+    if (type >= 0x100) return 0;
+    const uint64_t p = table[type * 2];
+    if (p & 1) return p < 0x10000;
+    return p && p >= (uint64_t)(uintptr_t)image && p < (uint64_t)(uintptr_t)image + ubr_image_size;
+}
 static void ubr_install(uint64_t image_size) {
     static const unsigned char loop[] = {0x44, 0x89, 0xe0, 0x48, 0x8d, 0x0c, 0x40, 0x48, 0xc1, 0xe1, 0x04, 0x49, 0x8d, 0x44,
         0x0b, 0x28, 0x41, 0x0f, 0xb7, 0x54, 0x0b, 0x28, 0x48, 0xc1, 0xe2, 0x04, 0x48, 0x8b, 0x0c, 0x1a, 0x48, 0x8b, 0x7c,
@@ -334,6 +346,7 @@ static void ubr_install(uint64_t image_size) {
         return;
     }
     ubr_loop = image + 0x6400e0;
+    ubr_image_size = image_size;
     printf("UC1 binding retry: a shader binding with no handler (0x64011d) waits for its entry, else is skipped (GOW3_UC1_BIND_RETRY)\n");
 }
 static void ubr_dump(const char *when, const unsigned char *list) {
@@ -344,8 +357,14 @@ static void ubr_dump(const char *when, const unsigned char *list) {
     }
     fprintf(stderr, "\n");
 }
-static int ubr_handle(CONTEXT *c) {
-    if (!ubr_loop || c->Rip != 0 || *(const uint64_t *)(uintptr_t)c->Rsp != (uint64_t)(uintptr_t)(ubr_loop + 0x3f)) return 0;
+/* kind: 8 an execute fault (at 0 or at another address the call jumped to), else a read fault at
+ * the call itself (a non-canonical target reads as ffffffffffffffff) */
+static int ubr_handle(CONTEXT *c, uint64_t kind, uint64_t address) {
+    if (!ubr_loop) return 0;
+    int pushed;
+    if (kind == 8 && *(const uint64_t *)(uintptr_t)c->Rsp == (uint64_t)(uintptr_t)(ubr_loop + 0x3f) && c->Rip == c->Rcx) pushed = 1;
+    else if (kind != 8 && c->Rip == (DWORD64)(uintptr_t)(ubr_loop + 0x3d) && address == ~0ull) pushed = 0;
+    else return 0;
     const unsigned char *list = (const unsigned char *)(uintptr_t)c->R14;
     const uint64_t *table = (const uint64_t *)(uintptr_t)c->Rbx;
     const uint32_t i = (uint32_t)c->R12;
@@ -354,25 +373,72 @@ static int ubr_handle(CONTEXT *c) {
     const LONG n = InterlockedIncrement(&ubr_count);
     const int log = n <= 8 || n % 100 == 0;
     if (log) {
-        fprintf(stderr, "UC1 binding retry #%ld (thread %lu): entry %u of %u has type %#x, no handler\n", (long)n,
-                GetCurrentThreadId(), i, *(const uint32_t *)(list + 0x24), first);
+        fprintf(stderr, "UC1 binding retry #%ld (thread %lu): entry %u of %u has type %#x, no handler (call to %#llx)\n", (long)n,
+                GetCurrentThreadId(), i, *(const uint32_t *)(list + 0x24), first, (unsigned long long)c->Rcx);
         ubr_dump("at the fault", list);
     }
     int waited = 0;
-    while (waited < 16 && !table[*type * 2]) { Sleep(1); ++waited; }
+    while (waited < 16 && !ubr_valid(table, *type)) { Sleep(1); ++waited; }
     const uint16_t now = *type;
-    c->Rsp += 8; /* the call's return address */
-    if (table[now * 2]) {
+    if (pushed) c->Rsp += 8; /* the call's return address */
+    if (ubr_valid(table, now)) {
         c->R11 = c->R14; c->Rip = (DWORD64)(uintptr_t)ubr_loop; /* the loop reads the entry again */
     } else {
         c->Rip = (DWORD64)(uintptr_t)(ubr_loop + 0x3f); /* the next entry */
     }
     if (log) {
         fprintf(stderr, "UC1 binding retry #%ld: after %d ms the type is %#x: %s\n", (long)n, waited, now,
-                table[now * 2] ? "run again" : "skipped");
+                ubr_valid(table, now) ? "run again" : "skipped");
         if (now != first) ubr_dump("after the wait", list);
         fflush(stderr);
     }
+    return 1;
+}
+/* GOW3_MOUSE_AIM_WATCH (U1 mouse diagnostic, runtime_pad.c): who writes the aim camera's look vectors
+ * while the zoom settles. The aim hook asks (runtime_aim_watch) for write watchpoints on its own thread
+ * (debug registers 0 and 1, 8 bytes each); every write is counted by its instruction (image offset). */
+#define AW_RIPS 32
+static volatile uint64_t aw_addr[2];
+static volatile LONG aw_on, aw_used;
+static volatile LONG64 aw_keys[2][AW_RIPS];
+static volatile LONG aw_counts[2][AW_RIPS];
+#define AW_CODE 0xe0a1a1a1u
+void runtime_aim_watch(uint64_t at0, uint64_t at1, int on) {
+    if (on) { aw_addr[0] = at0; aw_addr[1] = at1; aw_used = 1; }
+    aw_on = on;
+    RaiseException(AW_CODE, 0, 0, NULL);
+}
+void runtime_aim_watch_report(const char *what) {
+    for (int f = 0; f < 2; ++f) {
+        char line[1024];
+        int n = snprintf(line, sizeof(line), "Mouse: U1 zoom writers of %s %s:", f ? "+0x1830" : "+0x1680", what);
+        for (int i = 0; i < AW_RIPS && aw_keys[f][i]; ++i) {
+            if (n < (int)sizeof(line) - 40) n += snprintf(line + n, sizeof(line) - n, " %#llx x%ld", (unsigned long long)aw_keys[f][i], (long)aw_counts[f][i]);
+            aw_counts[f][i] = 0; aw_keys[f][i] = 0;
+        }
+        puts(line);
+    }
+}
+static int aw_handle(const EXCEPTION_RECORD *record, CONTEXT *c) {
+    if (record->ExceptionCode == AW_CODE) {
+        if (aw_on) {
+            c->Dr0 = aw_addr[0]; c->Dr1 = aw_addr[1];
+            c->Dr7 = (c->Dr7 & ~((DWORD64)0xff << 16)) | 0x5 | ((DWORD64)0x99 << 16); /* write, 8 bytes */
+        } else c->Dr7 &= ~(DWORD64)0xf;
+        c->ContextFlags |= CONTEXT_DEBUG_REGISTERS;
+        return 1;
+    }
+    if (!aw_used || record->ExceptionCode != EXCEPTION_SINGLE_STEP || !(c->Dr6 & 3)) return 0;
+    if (!aw_on) { c->Dr7 &= ~(DWORD64)0xf; c->ContextFlags |= CONTEXT_DEBUG_REGISTERS; c->Dr6 = 0; return 1; }
+    const uint64_t rip = c->Rip - (uint64_t)(uintptr_t)image;
+    for (int f = 0; f < 2; ++f) {
+        if (!(c->Dr6 & (1u << f))) continue;
+        for (int i = 0; i < AW_RIPS; ++i) {
+            const LONG64 seen = InterlockedCompareExchange64(&aw_keys[f][i], (LONG64)rip, 0);
+            if (!seen || (uint64_t)seen == rip) { InterlockedIncrement(&aw_counts[f][i]); break; }
+        }
+    }
+    c->Dr6 = 0;
     return 1;
 }
 static int fatal_reported;
@@ -447,6 +513,7 @@ static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
         cbw_arm_self(c,c->Rbx);
         return EXCEPTION_CONTINUE_EXECUTION;
     }
+    if (aw_handle(record,info->ContextRecord)) return EXCEPTION_CONTINUE_EXECUTION;
     if (cbw_site && code==EXCEPTION_SINGLE_STEP && (info->ContextRecord->Dr6 & 0xf)) {
         cbw_note_write(info->ContextRecord);
         return EXCEPTION_CONTINUE_EXECUTION;
@@ -457,7 +524,7 @@ static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
          * needs: a draw-preparation worker keeps the pipeline cache shared-locked, and the GPU
          * thread waited for it exclusively (Uncharted 3, New Game). The GPU thread redoes that
          * work itself. */
-        if (record->ExceptionInformation[0]==8 && ubr_handle(info->ContextRecord)) return EXCEPTION_CONTINUE_EXECUTION;
+        if (ubr_handle(info->ContextRecord,record->ExceptionInformation[0],record->ExceptionInformation[1])) return EXCEPTION_CONTINUE_EXECUTION;
         if (!runtime_fault_recover && gpu_enabled && gow3gpu_handle_fault(info,(void *)record->ExceptionInformation[1]))
             return EXCEPTION_CONTINUE_EXECUTION;
         if (runtime_fault_recover) {
@@ -871,7 +938,80 @@ static unsigned char *near_image_memory(uint64_t image_size, size_t size) {
 #endif
     return memory;
 }
-volatile uint64_t runtime_guest_rbp, runtime_guest_ret;
+volatile uint64_t runtime_guest_rbp, runtime_guest_ret, runtime_image_base, runtime_guest_r14;
+/* GOW3_MOUSE_U1_CALL98=1 (UC1 1.02 diagnostic, off by default): every "call *0x98(%reg)" in the code
+ * (the slot the camera manager updates the cameras through) gets a thunk that reports the site, the
+ * function about to be called and rdi/rsi to runtime_call98_seen (runtime_pad.c), to find the camera
+ * update of the mounted gun, which none of the census classes runs (Fable, 2026-10-23). */
+static void install_call98_log(const Segment *segments, uint64_t ns, uint64_t image_size) {
+    const char *v=getenv("GOW3_MOUSE_U1_CALL98");
+    if (!(v && v[0]=='1')) return;
+    static const unsigned char check[]={0xff,0x90,0x98,0x00,0x00,0x00};
+    if (image_size<0x7ab30 || memcmp(image+0x7ab24,check,sizeof(check))) { printf("Call98: not UC1 1.02, off\n"); return; }
+    unsigned char *thunks=near_image_memory(image_size,1u<<17);
+    if (!thunks) { printf("Call98: no thunk memory\n"); return; }
+    size_t used=0;
+    int installed=0, skipped=0;
+    static uint64_t cells[256];
+    /* the 68 sites in UC1 1.02, each checked as a whole instruction with objdump (no stray byte matches) */
+    static const uint64_t sites[]={0xde22,0x1177b,0x1479d,0x2fe51,0x2fec9,0x3040d,0x3047a,0x304bc,0x61c16,0x7ab24,0xe8630,0xe92de,0xe9361,0x147fbb,0x148083,0x148144,0x254c57,0x255057,0x26408e,0x2710b2,0x3193ef,0x3264cd,0x44f7a8,0x450a0a,0x451f48,0x4521b6,0x457aaa,0x4657c6,0x4658b6,0x465920,0x465938,0x472aa1,0x49cf4b,0x4ebee0,0x4ef03c,0x519ad6,0x51a5a4,0x545d8b,0x545f79,0x64cfff,0x64d7e9,0x64e429,0x6a0acb,0x6b83c4,0x6bea17,0x6bf110,0x6c22f0,0x6d340b,0x6dd3a6,0x6e3936,0x6e4063,0x6f276d,0x6f9015,0x6fd840,0x7010f1,0x702ad9,0x7039c9,0x70467a,0x70d641,0x71e33b,0x71e778,0x71eba6,0x72751c,0x729441,0x72aa81,0x72bbc4,0x74faf9,0x74fd43};
+    runtime_image_base=(uint64_t)(uintptr_t)image;
+    for (size_t si=0;si<sizeof(sites)/sizeof(sites[0]);++si) {
+        {
+            const uint64_t at=sites[si];
+            if (!in_code(segments,ns,at,7)) { ++skipped; continue; }
+            const unsigned char *f=image+at;
+            const int rex=f[0]==0x41;
+            const unsigned char *c=f+rex;
+            if (c[0]!=0xff || (c[1]&0xf8)!=0x90 || c[2]!=0x98 || c[3]||c[4]||c[5]) { ++skipped; continue; }
+            const int reg=(c[1]&7)+(rex ? 8 : 0);
+            const size_t moved=6+(size_t)rex;
+            if ((reg&7)==4 || installed>=256) { ++skipped; continue; }
+            if (used+400>(1u<<17)) { ++skipped; continue; }
+            unsigned char *t=thunks+used;
+            size_t k=0;
+            const uintptr_t cell=(uintptr_t)&cells[installed];
+            t[k++]=0x50;                                                   /* push rax */
+            t[k++]=(unsigned char)(0x48|(reg>=8 ? 1 : 0)); t[k++]=0x8b;     /* mov rax, [reg+0x98] */
+            t[k++]=(unsigned char)(0x80|(reg&7));
+            { const uint32_t disp=0x98; memcpy(t+k,&disp,4); k+=4; }
+            t[k++]=0x48; t[k++]=0xa3; memcpy(t+k,&cell,8); k+=8;          /* movabs [cell], rax */
+            t[k++]=0x58;                                                   /* pop rax */
+            static const unsigned char save[]={0x9c,0x50,0x51,0x52,0x41,0x50,0x41,0x51,0x41,0x52,0x41,0x53,0x53,
+                                               0x48,0x89,0xe3,0x48,0x83,0xe4,0xf0,0x48,0x81,0xec,0xa0,0x00,0x00,0x00};
+            memcpy(t+k,save,sizeof(save)); k+=sizeof(save);
+            for (int x=0;x<8;++x) {
+                const uint32_t disp=0x20u+16u*(uint32_t)x;
+                t[k++]=0xf3; t[k++]=0x0f; t[k++]=0x7f; t[k++]=(unsigned char)(0x84|x<<3); t[k++]=0x24;
+                memcpy(t+k,&disp,4); k+=4;
+            }
+            t[k++]=0x48; t[k++]=0x89; t[k++]=0xf9;                         /* mov rcx, rdi */
+            t[k++]=0x48; t[k++]=0x89; t[k++]=0xf2;                         /* mov rdx, rsi */
+            { const uint64_t site=at; t[k++]=0x49; t[k++]=0xb8; memcpy(t+k,&site,8); k+=8; } /* movabs r8, site */
+            t[k++]=0x48; t[k++]=0xb8; memcpy(t+k,&cell,8); k+=8;           /* movabs rax, cell */
+            t[k++]=0x4c; t[k++]=0x8b; t[k++]=0x08;                         /* mov r9, [rax] */
+            { const uintptr_t host=(uintptr_t)runtime_call98_seen; t[k++]=0x48; t[k++]=0xb8; memcpy(t+k,&host,8); k+=8; }
+            t[k++]=0xff; t[k++]=0xd0;                                      /* call rax */
+            for (int x=0;x<8;++x) {
+                const uint32_t disp=0x20u+16u*(uint32_t)x;
+                t[k++]=0xf3; t[k++]=0x0f; t[k++]=0x6f; t[k++]=(unsigned char)(0x84|x<<3); t[k++]=0x24;
+                memcpy(t+k,&disp,4); k+=4;
+            }
+            static const unsigned char restore[]={0x48,0x89,0xdc,0x5b,0x41,0x5b,0x41,0x5a,0x41,0x59,0x41,0x58,
+                                                  0x5a,0x59,0x58,0x9d};
+            memcpy(t+k,restore,sizeof(restore)); k+=sizeof(restore);
+            memcpy(t+k,f,moved); k+=moved;                                 /* the call itself */
+            int32_t back=(int32_t)((int64_t)(uintptr_t)(f+moved)-(int64_t)(uintptr_t)(t+k+5));
+            t[k++]=0xe9; memcpy(t+k,&back,4); k+=4;
+            unsigned char *w=image+at;
+            int32_t to=(int32_t)((int64_t)(uintptr_t)t-(int64_t)(uintptr_t)(w+5));
+            w[0]=0xe9; memcpy(w+1,&to,4); memset(w+5,0x90,moved-5);
+            used+=(k+15)&~(size_t)15;
+            ++installed;
+        }
+    }
+    printf("Call98: %d call sites logged, %d skipped\n",installed,skipped);
+}
 static void install_game_callbacks(const Segment *segments, uint64_t ns, uint64_t image_size) {
     size_t count=0;
     const RuntimeGuestCallback *callbacks=runtime_guest_callbacks(&count);
@@ -931,6 +1071,14 @@ static void install_game_callbacks(const Segment *segments, uint64_t ns, uint64_
         t[k++]=0x49; t[k++]=0xb8; memcpy(t+k,&base,8); k+=8;        /* movabs r8, image */
         if (c->rdx==2) { t[k++]=0x4c; t[k++]=0x8b; t[k++]=0x4b; t[k++]=0x48; } /* mov r9, [rbx+0x48]: the return address */
         if (!c->rdx) { t[k++]=0x4d; t[k++]=0x89; t[k++]=0xf1; }     /* mov r9, r14 */
+        if (c->rdx==3) { t[k++]=0x4c; t[k++]=0x8b; t[k++]=0x0b; }  /* mov r9, [rbx]: the guest's rbx */
+        if (c->rdx==4) { t[k++]=0x4d; t[k++]=0x89; t[k++]=0xe1; }  /* mov r9, r12 */
+        if (c->rdx==6) {                                            /* runtime_guest_r14=r14; then as 5 */
+            const uintptr_t at=(uintptr_t)&runtime_guest_r14;
+            t[k++]=0x48; t[k++]=0xb8; memcpy(t+k,&at,8); k+=8;      /* movabs rax, &runtime_guest_r14 */
+            t[k++]=0x4c; t[k++]=0x89; t[k++]=0x30;                  /* mov [rax], r14 */
+        }
+        if (c->rdx==5 || c->rdx==6) { t[k++]=0x49; t[k++]=0x89; t[k++]=0xd9; }  /* mov r9, rbx: the saved registers (guest r9 at +0x18, the return address at +0x48) */
         if (c->rdx==2) {                                            /* movabs rax, &runtime_guest_rbp; mov [rax], rbp */
             const uintptr_t at=(uintptr_t)&runtime_guest_rbp;
             t[k++]=0x48; t[k++]=0xb8; memcpy(t+k,&at,8); k+=8;
@@ -1967,6 +2115,7 @@ int main(int argc, char **argv) {
 #endif
     /* ucndc: mouse camera (input.ini with mouse_look=1; GOW3_MOUSE_CAMERA=0 keeps the mouse a stick) */
     if (gpu_enabled && runtime_pad_mouse_camera()) install_game_callbacks(segments, ns, size);
+    if (gpu_enabled && runtime_pad_mouse_camera()) install_call98_log(segments, ns, size);
 #ifdef _WIN32
     printf("Guest TCB loads redirected to the TEB TLS slot: %" PRIu64 "\n", patch_tcb_loads(segments, ns));
 #endif
