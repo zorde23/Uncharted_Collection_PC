@@ -146,6 +146,7 @@ extern volatile uint64_t runtime_guest_ret;
  * instruction; on=0 stops counting and the report prints and clears the counts (probe.c). */
 void runtime_aim_watch(uint64_t at0, uint64_t at1, int on);
 void runtime_aim_watch_report(const char *what);
+uint64_t runtime_aim_watch_last(int f); /* the last writer (image offset) of watch address f since the last call, 0 if none */
 #endif
 /* 1 when input.ini turns mouse look on and GOW3_MOUSE_CAMERA is not 0: the loader installs the
  * mouse camera callbacks. */

@@ -6,7 +6,7 @@ Runs the games of **Uncharted: The Nathan Drake Collection** (PS4, Bluepoint, 20
 and 11. It is not a source port and not a classic emulator: the original PS4 executable runs
 directly on the PC's CPU, on top of a compatibility layer that replaces the PS4 system and
 translates its graphics to Vulkan (see [How it works](#how-it-works)). The focus is **Uncharted 3: Drake's Deception**, playable from start to end at 60 FPS in 1080p with no upscaling or frame generation;
-Uncharted 2 is playable and Uncharted 1 runs (experimental).
+Uncharted 2 and Uncharted 1 are playable.
 
 > **No game files are included.** You need a dump from your own PS4
 > (tested: **CUSA02344**, version 01.00 with the **01.02** update).
@@ -80,6 +80,12 @@ Updated 2026-10-23.
 | Uncharted 2 | `big2-ps4_Shipping.elf` | Playable, 51–60 FPS, with its own saves |
 | Uncharted 3 | `big3-ps4_Shipping.elf` | **100% playable from start to end**, at **60 FPS in 1080p, with no upscaling or frame generation**. Some parts still need optimization and drop below 60 (around 50 in heavy vegetation, the Chateau), always staying above 30 FPS. One crash in the whole playthrough, not reproduced or fixed yet. Known issues listed below |
 
+New in 0.3.6:
+- **FPS is back**: 0.3.4 and 0.3.5 lost about 20% FPS in heavy scenes (for example the Citadel in UC3). Fixed.
+- UC1: **mouse camera fixed** while walking, on stairs, aiming, in cover, on the car turret, on the jet ski and on mounted guns.
+- Fix for crashes on Intel 12th gen and newer CPUs (on for everyone; only tested in one player's UC1).
+- Options > Advanced, Experimental: "2 preparation threads", may help 4 and 6 core CPUs (a tie on the development PC).
+
 New in 0.3.5:
 - **Keyboard or Xbox icons** in all three games: in the launcher's Controls window, "Icons in the game" switches the button prompts in texts and in the HUD from the PlayStation buttons to your keys or to Xbox buttons in the game's own style.
 - UC3: the soft red round spots some players saw (bloom, on every GPU) are fixed.
@@ -120,7 +126,6 @@ Known issues:
 
 **Uncharted 1**
 - **A crash seen on one PC with an Intel Core i5-14600K + NVIDIA RTX 3070** (two times, same spot in the game code). It never happened on the development PC (AMD Ryzen 7 5700X + Radeon RX 6750 XT). In 0.3.5 the game waits a moment and goes on instead of closing; at worst one object can look wrong for one frame. If you see "UC1 binding retry" in `last_run.log`, please send the log.
-- **Mouse camera still inconsistent while walking**: at times the camera stops following the mouse for a moment (about 0.1 s) and then goes back to normal. Aiming with the mouse is fine. Not fixed yet.
 - Lightly tested. Please report missing sounds or visual bugs.
 
 The project log (in Portuguese), with what was done and why, is in
@@ -183,7 +188,7 @@ Double-click the game's `.bat` in `windows\`:
 | `compilar.bat` | Builds the port |
 | `jogar_uc3.bat` | Uncharted 3 with the optimizations (60 FPS) |
 | `jogar_uc2.bat` | Uncharted 2 (without `UC_COMPUTE_PIPE`, because of the train) |
-| `jogar_uc1.bat` | Uncharted 1 (experimental) |
+| `jogar_uc1.bat` | Uncharted 1 |
 | `fechar_jogo.bat` | Closes the game if it hangs |
 
 Each session's log goes to `out\last-run.log` (the previous one to `out\previous-run.log`). Saves

@@ -39,7 +39,7 @@ LOG_FILE = USER_DIR / 'last_run.log'
 INPUT_FILE = DATA_DIR / 'input.ini'
 APP_NAME = 'Uncharted Collection PC'
 EXE_NAME = 'Uncharted Launcher.exe'
-VERSION = '0.3.6-beta2'
+VERSION = '0.3.6'
 RELEASES_API = 'https://api.github.com/repos/zorde23/Uncharted_Collection_PC/releases/latest'
 RELEASES_PAGE = 'https://github.com/zorde23/Uncharted_Collection_PC/releases/latest'
 NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
@@ -60,7 +60,7 @@ COMMON = {
 }
 # key, title, executable, (status pt, status en), extra options
 GAMES = [
-    ('uc1', "Uncharted: Drake's Fortune", 'eboot.bin', ('Experimental', 'Experimental'),
+    ('uc1', "Uncharted: Drake's Fortune", 'eboot.bin', ('Jogável', 'Playable'),
      {'GOW3_COMPUTE_PIPE': '1', 'GOW3_LOW_IMAGE': '1', 'GOW3_AJM_END_RULES': '1', 'GOW3_EOP_TICK_WAIT': '1',
       'GOW3_MOUSE_AIM_U1_ALL': '1', 'GOW3_READBACK_SIDEQ': '1',
       # From UC3 (tested on UC1 2026-10-20: the flashlight works with them). FAULT_WRITES: crash log aid.
@@ -68,7 +68,12 @@ GAMES = [
       'GOW3_SCOPE_SPLIT_SCALAR': '1', 'GOW3_DEPTH_KEEP_CLEAR': '1', 'GOW3_FAULT_WRITES': '1',
       'GOW3_MOUSE_CAMERA_LOG': '1', 'GOW3_CB_WATCH': '1',
       # The friend's crash (execute at 0, 2026-10-22): a binding with no handler waits, else is skipped.
-      'GOW3_UC1_BIND_RETRY': '1'}),
+      'GOW3_UC1_BIND_RETRY': '1',
+      # UC1 mouse camera (2026-10-23/24): aim, cover, car turret, jet ski, walking/stairs (hold), mounted gun.
+      'GOW3_MOUSE_STEADY': '1', 'GOW3_MOUSE_AIM_U1_POST': '1', 'GOW3_MOUSE_U1_LEASH': '1',
+      'GOW3_MOUSE_U1_PER_OBJ': '1', 'GOW3_MOUSE_U1_SWAP_SNAP': '1', 'GOW3_MOUSE_U1_AIM_PHASE': '1',
+      'GOW3_MOUSE_U1_AIM_SEED_FOLLOW': '1', 'GOW3_MOUSE_U1_FAST_STICK': '1', 'GOW3_MOUSE_U1_HOLD_INPUT': '1',
+      'GOW3_MOUSE_U1_GUN': '1', 'GOW3_MOUSE_U1_CAR': '1', 'GOW3_MOUSE_PUSH': '0'}),
     ('uc2', 'Uncharted 2: Among Thieves', 'big2-ps4_Shipping.elf', ('Jogável', 'Playable'),
      # Without GOW3_COMPUTE_PIPE: with it the train carriage in the prologue falls too early. The two
      # in-order options keep the rooftop at 60 FPS; the train jump is still timing-sensitive with them.
@@ -84,7 +89,7 @@ GAMES = [
       'GOW3_DEPTH_KEEP_CLEAR': '1'}),
 ]
 # Off unless chosen in Options > Advanced (launcher.json 'experimental'): (games, value).
-EXPERIMENTAL = {'GOW3_PREP_TRUST_A1': (('uc3',), '1')}
+EXPERIMENTAL = {'GOW3_PREP_TRUST_A1': (('uc3',), '1'), 'GOW3_PREP_WORKERS': (('uc1', 'uc2', 'uc3'), '2')}
 # ucndc.ini values the games were tested with, written when the file does not exist yet.
 # Only keys the Uncharted games use (render_resolution, engine_fps, fsr1, rcas and upscaler are GoW3 patches).
 INI_DEFAULTS = {'display_mode': 'windowed', 'vsync': '1', 'fps_limit': '0',
@@ -140,6 +145,7 @@ TOGGLE_HELP = {
     'GOW3_SCOPE_SPLIT_SCALAR': ('Névoa dos cones de luz sem cunhas pretas (UC1, UC2 e UC3)', 'Light cone fog without black wedges (UC1, UC2 and UC3)'),
     'GOW3_DEPTH_KEEP_CLEAR': ('Sombras e luzes sem piscar (UC1, UC2 e UC3)', 'Shadows and lights without flicker (UC1, UC2 and UC3)'),
     'GOW3_PREP_TRUST_A1': ('Experimental: preparo de desenhos mais rápido (+FPS, UC3)', 'Experimental: faster draw preparation (+FPS, UC3)'),
+    'GOW3_PREP_WORKERS': ('Experimental: 2 threads de preparo (pode ajudar CPUs de 4 e 6 núcleos)', 'Experimental: 2 preparation threads (may help 4 and 6 core CPUs)'),
     'GOW3_JOB_SLEEP': ('Threads de jobs podem dormir no gameplay (menos CPU)', 'Job threads may sleep in gameplay (less CPU)'),
 }
 # Options > Advanced shows the toggles in two lists: these fix bugs, the others are for performance.
@@ -152,7 +158,10 @@ FPS_LIMITS = [('0', ('Sem limite (60)', 'No limit (60)')), ('30', ('30', '30')),
 FIXED = {'GOW3_READBACKS', 'GOW3_FRAME_STATS', 'GOW3_LOW_IMAGE', 'GOW3_AJM_END_RULES', 'GOW3_EOP_TICK_WAIT',
          'GOW3_HLE_INVALIDATE', 'GOW3_FAULT_WRITES',
          'GOW3_MOUSE_CAMERA_LOG', 'GOW3_CB_WATCH', 'GOW3_OVERLAP_KEEP_VIEW', 'GOW3_UC1_BIND_RETRY',
-         'GOW3_RED_ZONE'}
+         'GOW3_RED_ZONE', 'GOW3_MOUSE_STEADY', 'GOW3_MOUSE_AIM_U1_POST', 'GOW3_MOUSE_U1_LEASH',
+         'GOW3_MOUSE_U1_PER_OBJ', 'GOW3_MOUSE_U1_SWAP_SNAP', 'GOW3_MOUSE_U1_AIM_PHASE',
+         'GOW3_MOUSE_U1_AIM_SEED_FOLLOW', 'GOW3_MOUSE_U1_FAST_STICK', 'GOW3_MOUSE_U1_HOLD_INPUT',
+         'GOW3_MOUSE_U1_GUN', 'GOW3_MOUSE_U1_CAR', 'GOW3_MOUSE_PUSH'}
 
 # Controls window (input.ini, read by the game: src/runtime_pad.c), ported from SuperMedo's launcher
 # (uncharted_pc, GPL). Actions with their PS4 names, the default keys ("A|B": two bindings) and the

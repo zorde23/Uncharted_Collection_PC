@@ -402,6 +402,7 @@ static volatile uint64_t aw_addr[2];
 static volatile LONG aw_on, aw_used;
 static volatile LONG64 aw_keys[2][AW_RIPS];
 static volatile LONG aw_counts[2][AW_RIPS];
+static volatile LONG64 aw_last[2]; /* the last writer of each address (image offset), for GOW3_MOUSE_U1_GUN_LOG */
 #define AW_CODE 0xe0a1a1a1u
 void runtime_aim_watch(uint64_t at0, uint64_t at1, int on) {
     if (on) { aw_addr[0] = at0; aw_addr[1] = at1; aw_used = 1; }
@@ -418,6 +419,9 @@ void runtime_aim_watch_report(const char *what) {
         }
         puts(line);
     }
+}
+uint64_t runtime_aim_watch_last(int f) {
+    return (uint64_t)InterlockedExchange64(&aw_last[f & 1], 0);
 }
 static int aw_handle(const EXCEPTION_RECORD *record, CONTEXT *c) {
     if (record->ExceptionCode == AW_CODE) {
@@ -437,6 +441,7 @@ static int aw_handle(const EXCEPTION_RECORD *record, CONTEXT *c) {
             const LONG64 seen = InterlockedCompareExchange64(&aw_keys[f][i], (LONG64)rip, 0);
             if (!seen || (uint64_t)seen == rip) { InterlockedIncrement(&aw_counts[f][i]); break; }
         }
+        aw_last[f] = (LONG64)rip;
     }
     c->Dr6 = 0;
     return 1;

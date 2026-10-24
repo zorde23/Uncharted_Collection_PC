@@ -635,6 +635,11 @@ static int follow_fast_on(void) {
     return on;
 }
 static volatile int follow_fast;          /* the stick pays the deficit (follow_correction) */
+static int u1_hold_input_on(void);        /* GOW3_MOUSE_U1_HOLD_INPUT, below */
+/* with HOLD_INPUT (Fable 2026-10-24, the 3 stick stints of the 19:19 run): the frame of the pending write
+ * had r9b forced; the stick stint came from such frames; when the mouse object was last called */
+static int follow_pending_held, follow_fast_from_held;
+static uint64_t follow_turned_call_us;
 static float follow_fast_wanted, follow_lost_sum;
 static int follow_loss_run, follow_fast_probes, follow_fast_frames;
 static uint64_t follow_fast_obj, follow_fast_us;
@@ -755,6 +760,15 @@ static void follow_camera(uint64_t camera, uint32_t dir_offset, uint32_t arc_off
     camera_hook_us=now;
     const float heading=heading_of(dir);
     if (follow_u1 && !aim_held && (!follow_turned_obj || camera==follow_turned_obj)) { u1_follow_seen_heading=heading; u1_follow_seen_us=now; }
+    /* HOLD_INPUT: a follow object called while the mouse object has not been for 50 ms is the mouse object now
+     * (the game swapped objects): the hold and the direct writes go to it, its own heading is the target */
+    if (follow_u1 && u1_hold_input_on() && follow_turned_obj && camera!=follow_turned_obj && now-follow_turned_call_us>50000) {
+        if (mouse_debug()) printf("Mouse: follow t=%.4f swap routing: mouse object %#llx -> %#llx (not called for %.0f ms)\n",now*1e-6,
+                                  (unsigned long long)follow_turned_obj,(unsigned long long)camera,(now-follow_turned_call_us)*1e-3);
+        follow_turned_obj=camera; follow_pending=0; follow_relock=1;
+        if (follow_fast) follow_fast_obj=camera;
+    }
+    if (camera==follow_turned_obj) follow_turned_call_us=now;
     float dx, dy;
     camera_take(0,&dx,&dy);
     if (aim_held) { /* the aiming camera takes the mouse */
@@ -819,14 +833,21 @@ static void follow_camera(uint64_t camera, uint32_t dir_offset, uint32_t arc_off
                 /* by magnitude too (Fable): a camera sweeping by itself the other way gives a fraction kept */
                 const float moved=wrap_degrees(heading-follow_before), asked=wrap_degrees(follow_after-follow_before);
                 const int off=SDL_fabsf(moved-asked)>0.3f+0.25f*SDL_fabsf(asked);
-                if (kept<0.05f || (off && kept<0.5f)) { follow_lost_sum+=follow_pending_turn; ++follow_loss_run; }
-                else { follow_loss_run=0; follow_lost_sum=0.0f; }
-                if (follow_loss_run>=2) {
+                const int hold=u1_hold_input_on();
+                if (hold ? kept<0.1f : kept<0.05f || (off && kept<0.5f)) { follow_lost_sum+=follow_pending_turn; ++follow_loss_run; }
+                else if (hold && kept<0.6f) { /* HOLD_INPUT: a partial keep re-seeds the target, counts nothing (Fable) */
+                    follow_relock=1;
+                    if (mouse_debug()) printf("Mouse: follow t=%.4f partial keep %.2f ignored (target re-seeded)\n",now*1e-6,kept);
+                } else { follow_loss_run=0; follow_lost_sum=0.0f; }
+                /* HOLD_INPUT: with r9b held only a clamp loses a turn, and the stick cannot pass one either: 3 losses */
+                if (follow_loss_run>=(hold && follow_pending_held ? 3 : 2)) {
+                    follow_fast_from_held=hold && follow_pending_held;
                     direct=0; follow_fast=1; follow_fast_obj=camera; follow_fast_us=now; follow_fast_probes=follow_fast_frames=0;
                     follow_fast_alone=0;
                     follow_fast_wait=follow_fast_back_us && now-follow_fast_back_us<500000 ? (follow_fast_wait*2>120 ? 120 : follow_fast_wait*2) : 10;
                     follow_fast_wanted=wrap_degrees(heading-follow_lost_sum);
-                    printf("Mouse: follow t=%.4f 2 turns lost: the stick pays %.2f degrees\n",now*1e-6,follow_lost_sum);
+                    printf("Mouse: follow t=%.4f %d turns lost%s: the stick pays %.2f degrees\n",now*1e-6,follow_loss_run,
+                           follow_fast_from_held ? " (held frames)" : "",follow_lost_sum);
                     follow_loss_run=0; follow_lost_sum=0.0f;
                 }
             }
@@ -868,6 +889,7 @@ judged:;
     float correction=wrap_degrees(heading-follow_target);
     const uint64_t still=now-follow_moved_us;
     const int resting=!follow_moved_us || (still>150000 && (SDL_fabsf(correction)<0.5f || still>500000));
+    const int from_rest=!follow_moved_us || still>100000;
     if (turn!=0.0f) follow_moved_us=now;
     const int leash=follow_u1 && follow_leash_on();
     /* with the leash only the object the mouse turns moves the wanted heading: another follow camera
@@ -878,6 +900,9 @@ judged:;
         correction=0.0f;
     }
     if (leash && turn==0.0f) correction=0.0f;
+    /* HOLD_INPUT: the first mouse frame after rest turns by the mouse only, from this frame's heading (the
+     * game's own turn of this frame is no catch-up; Fable) */
+    if (leash && turn!=0.0f && mouse_obj && from_rest && follow_u1 && u1_hold_input_on()) { follow_target=heading; correction=0.0f; }
     if (leash) follow_relock=0;
     if (correction>90.0f || correction<-90.0f) { /* at most a quarter turn behind */
         correction=correction>0.0f ? 90.0f : -90.0f;
@@ -900,8 +925,16 @@ judged:;
         follow_push=0.0f;
         if (leash && turn!=0.0f && follow_stick_frames<10) {
             follow_stick_moved+=SDL_fabsf(wrap_degrees(heading-follow_stick_heading));
-            if (++follow_stick_frames==10)
+            if (++follow_stick_frames==10) {
                 printf("Mouse: U1 follow camera on the stick: the stick turned it %.2f degrees in 10 frames\n",follow_stick_moved);
+                if (follow_fast && follow_fast_from_held && follow_stick_moved<0.5f) { /* a clamp: the stick did not pass it either */
+                    follow_fast=0; follow_direct=1; follow_correction=0.0f; follow_relock=1; follow_loss_run=0; follow_lost_sum=0.0f;
+                    follow_fast_back_us=now;
+                    printf("Mouse: follow t=%.4f clamp probe: the stick did not turn it either, direct turns again\n",now*1e-6);
+                    follow_stick_heading=heading;
+                    return;
+                }
+            }
         }
         follow_stick_heading=heading;
         if (follow_fast) {
@@ -977,6 +1010,7 @@ judged:;
         dir[2]=x*s+z*c;
         if (SDL_fabsf(total)>=0.15f) {
             follow_pending_r9b=u1_follow_r9b;
+            follow_pending_held=0; /* set after the call when the hold forces r9b */
             follow_pending_turn=turn;
             follow_before=heading;
             follow_after=heading_of(dir);
@@ -1013,6 +1047,24 @@ static void u1_blend_log(uint64_t camera, uint64_t regs) {
            (unsigned long long)camera,w,w1c,*(const uint8_t *)(uintptr_t)(camera+0x1440),r9b,
            heading_of((const float *)(uintptr_t)(camera+0x1310)),(unsigned long long)block);
 }
+/* GOW3_MOUSE_U1_HOLD_INPUT=1 (test, off by default; Fable 2026-10-24, sem_push/desenho-fable-sem-push.md): the
+ * follow update reads its 6th argument (r9b, "the stick turns the camera this frame") once, at 0xaf119; set,
+ * it skips the body that rebuilds +0x1310 from the character's pose in the auto-follow state. While the mouse
+ * moved in the last GOW3_MOUSE_U1_HOLD_MS ms (150) or the stick pays a deficit, the object the mouse turns
+ * gets r9b=1 (the pad stays untouched), like a held stick: the direct writes stand. The judge keeps the
+ * pad's own r9b. */
+static int u1_hold_input_on(void) {
+    static int on=-1;
+    if (on<0) { const char *v=getenv("GOW3_MOUSE_U1_HOLD_INPUT"); on=v && v[0]=='1'; if (on) printf("Mouse: U1 follow camera holds the stick input while the mouse moves (GOW3_MOUSE_U1_HOLD_INPUT)\n"); }
+    return on;
+}
+static uint64_t u1_hold_ms(void) {
+    static long long v=-1;
+    if (v<0) { const char *e=getenv("GOW3_MOUSE_U1_HOLD_MS"); v=e && atoll(e)>=0 ? atoll(e) : 150; }
+    return (uint64_t)v;
+}
+static unsigned u1_hold_forced, u1_hold_calls;
+static uint64_t u1_hold_print_us;
 static void __attribute__((ms_abi)) u1_follow_camera(uint64_t camera, uint64_t unused, uint64_t image, uint64_t regs) {
     (void)unused; (void)image;
     if (camera && u1_blend_log_on()) u1_blend_log(camera,regs);
@@ -1044,6 +1096,22 @@ static void __attribute__((ms_abi)) u1_follow_camera(uint64_t camera, uint64_t u
     follow_u1=1;
     follow_camera(camera,0x1310,0x12bc,61.0f);
     follow_u1=0;
+    if (camera && u1_hold_input_on()) {
+        const uint64_t now=now_us();
+        ++u1_hold_calls;
+        const int mouse_obj=!follow_turned_obj || camera==follow_turned_obj;
+        if (mouse_obj && !aim_held && !u1_follow_r9b &&
+            (follow_fast || (follow_moved_us && now-follow_moved_us<u1_hold_ms()*1000))) {
+            *(uint64_t *)(uintptr_t)(regs+0x18)=(*(const uint64_t *)(uintptr_t)(regs+0x18)&~(uint64_t)0xff)|1;
+            ++u1_hold_forced;
+            if (follow_pending && follow_turned_obj==camera) follow_pending_held=1;
+        }
+        if (now-u1_hold_print_us>=1000000) {
+            if (u1_hold_print_us && mouse_debug() && u1_hold_calls)
+                printf("Mouse: U1 hold input: %u of %u follow calls held (stick fast %d)\n",u1_hold_forced,u1_hold_calls,(int)follow_fast);
+            u1_hold_forced=u1_hold_calls=0; u1_hold_print_us=now;
+        }
+    }
 }
 static void __attribute__((ms_abi)) u2_follow_camera(uint64_t camera, uint64_t unused, uint64_t image, uint64_t r14) {
     (void)unused; (void)image; (void)r14;
@@ -1096,6 +1164,7 @@ static volatile uint64_t aim_hook_us; /* the aiming camera's callback, below */
 static float aim_withheld_dx, aim_withheld_dy; /* GOW3_MOUSE_U1_AIM_PHASE: the aim's first frame mouse, kept from the stick */
 static volatile int aim_direct;
 static volatile uint64_t car_hook_us; /* U1's car turret camera (GOW3_MOUSE_U1_CAR), below */
+static volatile uint64_t gun_hook_us; /* U1's mounted gun in mouse mode (GOW3_MOUSE_U1_GUN), below */
 /* the cover camera's state (below) */
 static volatile uint64_t cover_hook_us;
 static volatile int cover_direct;
@@ -1137,6 +1206,7 @@ static void __attribute__((ms_abi)) u1_joypad_sticks(uint64_t unused0, uint64_t 
         dx=dy=0.0f;
     }
     if (car_hook_us && now-car_hook_us<100000) dx=dy=0.0f; /* so did the car turret */
+    if (gun_hook_us && now-gun_hook_us<100000) dx=dy=0.0f; /* so did the mounted gun */
     if (!aim_held && !following && !cover_off && cover_hook_us && now-cover_hook_us<100000 && cover_direct)
         dx=dy=0.0f; /* so did the cover camera */
     float (*curve)(float)=aim_held ? aim_stick : follow_stick;
@@ -1498,8 +1568,128 @@ static int aim_watch_on(void) {
     if (on<0) { const char *v=getenv("GOW3_MOUSE_AIM_WATCH"); on=v && v[0]=='1'; if (on) printf("Mouse: U1 aim watch: writers of +0x1680/+0x1830 for 700 ms after aiming starts\n"); }
     return on;
 }
+/* GOW3_MOUSE_U1_GUN_LOG=1 (diagnostic, off by default; Fable 2026-10-24): the mounted gun is the aim camera
+ * (0xc43b0) updated with no follow camera and the aim button up. Per such update, the state the last one left:
+ * +0x1830 heading/pitch, +0x1680 heading, +0x1884, +0x1798, +0x17a0, +0x2950, the right stick the game got,
+ * the last writer of +0x1830 and +0x1680 (write watchpoints) and whether the aim post hook sites (0xc50d4,
+ * 0xc270e) ran. */
+static int u1_gun_log_on(void) {
+    static int on=-1;
+    if (on<0) { const char *v=getenv("GOW3_MOUSE_U1_GUN_LOG"); on=v && v[0]=='1'; if (on) printf("Mouse: U1 mounted gun log (GOW3_MOUSE_U1_GUN_LOG)\n"); }
+    return on;
+}
+static float u1_vec_heading(uint64_t at); /* below, with the aim source log */
+static volatile int u1_gun_post_ran, u1_gun_post_f_ran; /* the aim post hook sites ran since the last gun line */
+static void u1_gun_log(uint64_t camera, uint64_t image) {
+#ifdef _WIN32
+    static int watching;
+    static uint64_t gun_camera;
+    const uint64_t now=now_us();
+    const int gun=camera && !aim_held && (!camera_hook_us || now-camera_hook_us>100000);
+    if (!gun) {
+        if (watching) { runtime_aim_watch(0,0,0); watching=0; gun_camera=0; printf("Mouse: U1 gun t=%.4f ends\n",now*1e-6); }
+        return;
+    }
+    if (watching && camera==gun_camera) {
+        const float *v=(const float *)(uintptr_t)(camera+0x1830), *p=(const float *)(uintptr_t)(camera+0x17a0), *q=(const float *)(uintptr_t)(camera+0x2950);
+        const float el=SDL_asinf(v[1]<-1.0f ? -1.0f : v[1]>1.0f ? 1.0f : v[1])*57.29578f;
+        const uint64_t w1830=runtime_aim_watch_last(1), w1680=runtime_aim_watch_last(0);
+        printf("Mouse: U1 gun t=%.4f 1830 %.2f/%.2f 1680 %.2f 1884 %.4f 1798=%u 17a0 %.2f %.2f %.2f 2950 %.2f %.2f %.2f stick %.3f %.3f; "
+               "last writer 1830 %#llx 1680 %#llx; post sites c50d4 %d c270e %d\n",now*1e-6,u1_vec_heading(camera+0x1830),el,
+               u1_vec_heading(camera+0x1680),*(const float *)(uintptr_t)(camera+0x1884),*(const uint8_t *)(uintptr_t)(camera+0x1798),
+               p[0],p[1],p[2],q[0],q[1],q[2],u1_right[0],u1_right[1],(unsigned long long)w1830,(unsigned long long)w1680,
+               u1_gun_post_ran,u1_gun_post_f_ran);
+    } else {
+        printf("Mouse: U1 gun t=%.4f starts: camera %#llx (aim class, no follow camera for %lld ms)\n",now*1e-6,(unsigned long long)camera,
+               camera_hook_us ? (long long)(now-camera_hook_us)/1000 : -1LL);
+        runtime_aim_watch(camera+0x1680,camera+0x1830,1);
+        runtime_aim_watch_last(0); runtime_aim_watch_last(1);
+        watching=1; gun_camera=camera;
+    }
+    u1_gun_post_ran=u1_gun_post_f_ran=0;
+    (void)image;
+#else
+    (void)camera; (void)image;
+#endif
+}
+/* GOW3_MOUSE_U1_GUN=1 (test, off by default; Fable 2026-10-24): the mounted gun is the aim camera (0xc43b0)
+ * with no follow camera and the aim button up; its direction +0x1830 is a settled aim (+0x1884 = 1,
+ * +0x1798 = 1) the right stick turns and 0xc50cc stores every frame. The mouse turns it there (the aim
+ * post hook at 0xc50d4) instead of going to the stick: a wanted heading and pitch seeded from +0x1830 on
+ * entry; a write the game did not keep (its limits) sets them back to the game's own direction. Ends
+ * when a follow camera runs or aiming starts. */
+static int u1_gun_on(void) {
+    static int on=-1;
+    if (on<0) { const char *v=getenv("GOW3_MOUSE_U1_GUN"); on=v && v[0]=='1'; if (on) printf("Mouse: U1 mounted gun turns with the mouse (GOW3_MOUSE_U1_GUN)\n"); }
+    return on;
+}
+static int gun_active, gun_seeded, gun_written_ok, gun_frames, gun_kept, gun_lost;
+static uint64_t gun_camera, gun_start_us, gun_print_us;
+static float gun_heading, gun_pitch, gun_written, gun_written_pitch;
+static void u1_gun_update(uint64_t camera) {
+    const uint64_t now=now_us();
+    const int gun=camera && !aim_held && (!camera_hook_us || now-camera_hook_us>100000);
+    if (!gun) {
+        if (gun_active) {
+            printf("Mouse: U1 gun mode ends t=%.4f (%s, %.0f ms, %d frames, kept %d lost %d)\n",now*1e-6,aim_held ? "aiming" : "follow camera",
+                   (double)(now-gun_start_us)/1000.0,gun_frames,gun_kept,gun_lost);
+            gun_active=0; gun_hook_us=0;
+        }
+        return;
+    }
+    if (!gun_active || camera!=gun_camera) {
+        float ignore_x, ignore_y;
+        camera_take(2,&ignore_x,&ignore_y); /* motion from before */
+        gun_active=1; gun_seeded=0; gun_written_ok=0; gun_heading=gun_pitch=0.0f; gun_frames=gun_kept=gun_lost=0; gun_camera=camera; gun_start_us=gun_print_us=now;
+        printf("Mouse: U1 gun mode starts t=%.4f camera %#llx\n",now*1e-6,(unsigned long long)camera);
+    }
+    gun_hook_us=now;
+    float dx, dy;
+    camera_take(2,&dx,&dy); /* the aim camera's queue: aim_camera below gets none */
+    gun_heading=wrap_degrees(gun_heading-dx*MOUSE_DEGREES_PER_PIXEL*mouse_sensitivity()); /* a turn of +t lowers the heading by t (aim_rotate) */
+    gun_pitch+=(mouse_cfg.invert_y ? dy : -dy)*MOUSE_DEGREES_PER_PIXEL*mouse_sensitivity();
+    if (now-gun_print_us>=1000000) {
+        printf("Mouse: U1 gun mode t=%.4f: kept %d lost %d in the last second\n",now*1e-6,gun_kept,gun_lost);
+        gun_kept=gun_lost=0; gun_print_us=now;
+    }
+}
+static void u1_gun_post(uint64_t camera) {
+    if (!gun_active || camera!=gun_camera || aim_held) return;
+    float *v=(float *)(uintptr_t)(camera+0x1830);
+    const float len=v[0]*v[0]+v[1]*v[1]+v[2]*v[2];
+    if (!(len>0.92f && len<1.08f)) return;
+    const float heading=aim_heading(v), el=SDL_asinf(v[1]<-1.0f ? -1.0f : v[1]>1.0f ? 1.0f : v[1])*57.29578f;
+    static uint64_t last_call_us;
+    const uint64_t call_us=now_us();
+    const int first_call=call_us-last_call_us>=4000;
+    last_call_us=call_us;
+    if (!gun_seeded) { /* the mouse turns since entry, on top of the game's direction */
+        gun_heading=wrap_degrees(heading+gun_heading); gun_pitch+=el; gun_seeded=1;
+    } else if (first_call && gun_written_ok) {
+        const int kept=SDL_fabsf(wrap_degrees(heading-gun_written))<0.3f && SDL_fabsf(el-gun_written_pitch)<0.3f;
+        if (kept) ++gun_kept;
+        else { /* the game's limit or its own turn: the wanted direction starts from the game's again */
+            ++gun_lost;
+            gun_heading=wrap_degrees(heading+wrap_degrees(gun_heading-gun_written));
+            gun_pitch=el+(gun_pitch-gun_written_pitch);
+        }
+    }
+    gun_pitch=gun_pitch<-70.0f ? -70.0f : gun_pitch>70.0f ? 70.0f : gun_pitch;
+    const float yaw=-wrap_degrees(gun_heading-heading), dpitch=gun_pitch-el;
+    if (yaw!=0.0f || dpitch!=0.0f) aim_rotate(v,yaw,dpitch);
+    if (first_call) {
+        gun_written=aim_heading(v);
+        gun_written_pitch=SDL_asinf(v[1]<-1.0f ? -1.0f : v[1]>1.0f ? 1.0f : v[1])*57.29578f;
+        gun_written_ok=1;
+    }
+    if (++gun_frames<=10 || (mouse_debug() && (yaw!=0.0f || dpitch!=0.0f)))
+        printf("Mouse: U1 gun t=%.4f game %.2f/%.2f wanted %.2f/%.2f turn %.2f/%.2f%s\n",call_us*1e-6,heading,el,gun_heading,gun_pitch,yaw,dpitch,
+               first_call ? "" : " (same frame)");
+}
 static void __attribute__((ms_abi)) u1_aim_camera(uint64_t buffer, uint64_t camera, uint64_t image, uint64_t block) {
     if (mouse_debug() && aim_held && aim_settling && camera) u1_aim_zoom_log(camera,block,image);
+    if (u1_gun_log_on()) u1_gun_log(camera,image);
+    if (u1_gun_on()) u1_gun_update(camera);
 #ifdef _WIN32
     static int watching;
     if (aim_watch_on() && camera) {
@@ -1588,6 +1778,8 @@ static void u1_aimsrc_log(uint64_t camera, float heading, float el) {
 }
 static void __attribute__((ms_abi)) u1_aim_post(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t camera) {
     (void)rdi; (void)rsi; (void)image;
+    if (!aim_held) u1_gun_post_ran=1;
+    if (!aim_held && u1_gun_on()) u1_gun_post(camera);
     if (!aim_post || !aim_held || !camera || camera!=aim_post_camera) return;
     float *v=(float *)(uintptr_t)(camera+0x1830);
     const float len=v[0]*v[0]+v[1]*v[1]+v[2]*v[2];
@@ -1647,6 +1839,7 @@ static void __attribute__((ms_abi)) u1_aim_post(uint64_t rdi, uint64_t rsi, uint
 static void __attribute__((ms_abi)) u1_aim_post_f(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t camera) {
     (void)rdi; (void)rsi; (void)image;
     static uint64_t same, other, second_us;
+    if (!aim_held) u1_gun_post_f_ran=1;
     if (!aim_post || !aim_held || !camera || !aim_post_seeded) return;
     if (camera!=aim_post_camera) ++other;
     else {

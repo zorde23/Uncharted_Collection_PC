@@ -6,7 +6,7 @@ Roda os jogos da **Uncharted: The Nathan Drake Collection** (PS4, Bluepoint, 201
 e 11. Não é um port do código-fonte nem um emulador clássico: o executável original do PS4 roda
 direto no processador do PC, sobre uma camada de compatibilidade que substitui o sistema do PS4 e
 traduz os gráficos para Vulkan (veja [Como funciona](#como-funciona)). O foco é o **Uncharted 3: Drake's Deception**, jogável do início ao fim a 60 FPS em 1080p, sem upscaling nem geração de quadros; o Uncharted 2
-é jogável e o Uncharted 1 roda (experimental).
+e o Uncharted 1 são jogáveis.
 
 > **Nenhum arquivo do jogo está incluído.** Você precisa do dump do seu próprio PS4
 > (testado: **CUSA02344**, versão 01.00 com a atualização **01.02**).
@@ -78,6 +78,12 @@ Atualizado em 23/10/2026.
 | Uncharted 2 | `big2-ps4_Shipping.elf` | Jogável, 51–60 FPS, com saves próprios |
 | Uncharted 3 | `big3-ps4_Shipping.elf` | **100% jogável do início ao fim**, a **60 FPS em 1080p, sem upscaling nem geração de quadros**. Algumas partes ainda precisam de otimização e caem abaixo de 60 (perto de 50 com muita vegetação, no Castelo), sempre acima de 30 FPS. Um único travamento no jogo inteiro, ainda não reproduzido nem corrigido. Problemas conhecidos listados abaixo |
 
+Novo na 0.3.6:
+- **FPS de volta**: a 0.3.4 e a 0.3.5 perdiam cerca de 20% de FPS nas cenas pesadas (por exemplo a Cidadela no UC3). Corrigido.
+- UC1: **câmera no mouse corrigida** ao andar, na escada, mirando, em cobertura, na torreta do carro, no jet ski e nas metralhadoras fixas.
+- Correção para travamentos em processadores Intel de 12ª geração ou mais novos (ligada para todos; testada só no UC1 de um jogador).
+- Opções > Avançado, Experimental: "2 threads de preparo", que pode ajudar CPUs de 4 e 6 núcleos (no PC de desenvolvimento ficou empatado).
+
 Novo na 0.3.5:
 - **Ícones de teclado ou de Xbox** nos três jogos: na janela Controles do launcher, "Ícones no jogo" troca os botões mostrados nos textos e no HUD dos de PlayStation pelas suas teclas ou por botões de Xbox no estilo do próprio jogo.
 - UC3: as manchas vermelhas redondas que alguns jogadores viam (bloom, em todas as placas) foram corrigidas.
@@ -119,7 +125,6 @@ Problemas conhecidos:
 
 **Uncharted 1**
 - **Um travamento visto num PC com Intel Core i5-14600K + NVIDIA RTX 3070** (duas vezes, no mesmo ponto do código do jogo). Nunca aconteceu no PC de desenvolvimento (AMD Ryzen 7 5700X + Radeon RX 6750 XT). Na 0.3.5 o jogo espera um instante e continua em vez de fechar; no pior caso um objeto pode sair errado por um quadro. Se aparecer "UC1 binding retry" no `last_run.log`, mande o log.
-- **Câmera no mouse ainda inconsistente ao andar**: às vezes a câmera para de seguir o mouse por um instante (cerca de 0,1 s) e depois volta ao normal. A mira com o mouse está boa. Ainda não corrigido.
 - Pouco testado. Avise se faltar algum som ou aparecer algum defeito.
 
 O diário do projeto, com o que foi feito e por quê, está em [docs/uc3/DEVLOG.md](docs/uc3/DEVLOG.md).
@@ -180,7 +185,7 @@ Dê dois cliques no `.bat` do jogo, dentro de `windows\`:
 | `compilar.bat` | Compila o port |
 | `jogar_uc3.bat` | Uncharted 3 com as otimizações (60 FPS) |
 | `jogar_uc2.bat` | Uncharted 2 (sem `UC_COMPUTE_PIPE`, por causa do trem) |
-| `jogar_uc1.bat` | Uncharted 1 (experimental) |
+| `jogar_uc1.bat` | Uncharted 1 |
 | `fechar_jogo.bat` | Fecha o jogo se ele travar |
 
 O log de cada sessão fica em `out\last-run.log` (o anterior em `out\previous-run.log`). Os saves

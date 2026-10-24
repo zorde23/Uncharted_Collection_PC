@@ -1,4 +1,4 @@
-Uncharted: The Nathan Drake Collection para PC (ucndc_pc) v0.3.5
+Uncharted: The Nathan Drake Collection para PC (ucndc_pc) v0.3.6
 ================================================================
 [English below]
 
@@ -21,7 +21,7 @@ Como jogar
    enquanto os shaders são criados; depois fica liso.
 
 Situação
-- Uncharted 1: experimental.
+- Uncharted 1: jogável.
 - Uncharted 2: jogável.
 - Uncharted 3: jogável, 60 FPS em 1080p, sem upscaling nem geração de quadros
   (perto de 50 FPS em áreas com muita vegetação, como o Castelo).
@@ -51,8 +51,6 @@ Problemas
 - UC2 em 4K (talvez 1440p): texturas do cenário podem piscar. Ainda sem correção.
 - UC1: se aparecer "UC1 binding retry" no log, mande o user\last_run.log (proteção de um
   travamento visto num PC, em teste).
-- UC1: a câmera no mouse ao andar ainda é inconsistente (às vezes para de seguir
-  o mouse por um instante). A mira está boa.
 - O jogo não abre ou fecha sozinho: clique em "Log" no launcher e, ao relatar, envie
   o arquivo user\last_run.log.
 
@@ -78,7 +76,7 @@ How to play
 
 Status: Uncharted 3 plays at 60 FPS in 1080p with no upscaling or frame generation (around
 50 FPS in heavy vegetation such as the Chateau);
-Uncharted 2 is playable; Uncharted 1 is experimental.
+Uncharted 2 and Uncharted 1 are playable.
 
 The launcher's Options button sets display mode, VSync, FPS limit and the FPS counter; Advanced
 lets you turn optimizations off ("Restore defaults" brings back the tested setup).
@@ -94,6 +92,5 @@ UC2 train prologue: you may need to jump earlier than on PS4; if the carriage st
 off UC_HLE_INORDER and UC_ACB_DISPATCH_PIPE in Options > Advanced for that part. UC3: rare
 driver timeout crash after long sessions, so save often. UC2 in 4K (maybe 1440p): scenery textures
 can flicker, not fixed yet. UC1: if "UC1 binding retry" shows up in the log, please send
-user\last_run.log (protection for a crash seen on one PC, being tested). UC1: the mouse camera while walking
-is still inconsistent (at times it stops following the mouse for a moment); aiming is fine.
+user\last_run.log (protection for a crash seen on one PC, being tested).
 Source code and credits: https://github.com/zorde23/Uncharted_Collection_PC
