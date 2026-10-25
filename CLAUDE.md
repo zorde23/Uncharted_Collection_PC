@@ -28,4 +28,6 @@ nomes `gow3`/`GOW3_`. Responder em português.
 - **Skills**: diagnóstico com `debugging-and-error-recovery` e `doubt-driven-development`;
   mudanças em fatias com `incremental-implementation` e revisão com `/ponytail-review`;
   commits com `git-workflow-and-versioning`; DEVLOG/HANDOFF com `documentation-and-adrs`.
-  Logs grandes (`out/last-run.log`) vão para um subagente resumir, não para o contexto principal.
+- **Do projeto** (`.claude/`): antes de cada commit, `/build-test` (compila e roda os testes que
+  valem no Windows; só passa sem falhas novas) e o subagente `conventions-reviewer`. Logs grandes
+  (`out/last-run.log`, capturas) vão para o subagente `trace-analyst`, não para o contexto principal.
