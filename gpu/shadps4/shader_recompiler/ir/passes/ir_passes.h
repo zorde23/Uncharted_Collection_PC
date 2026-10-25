@@ -39,6 +39,8 @@ void RingAccessElimination(const IR::Program& program, const RuntimeInfo& runtim
 void TessellationPreprocess(IR::Program& program, RuntimeInfo& runtime_info);
 void HullShaderTransform(IR::Program& program, const RuntimeInfo& runtime_info);
 void DomainShaderTransform(const IR::Program& program, const RuntimeInfo& runtime_info);
+/// gow3 (BilalReloaded): shaders that get barriers between the halves of a 64-lane wave.
+bool MultiwaveLdsBarriers(u64 pgm_hash);
 void SharedMemoryBarrierPass(IR::Program& program, const RuntimeInfo& runtime_info,
                              const Profile& profile);
 void SharedMemorySimplifyPass(IR::Program& program, const Profile& profile);

@@ -101,6 +101,8 @@ static size_t downmix_stereo(unsigned char *buf, size_t frames, int is_float) {
     }
     return frames*2*(is_float ? 4u : 2u);
 }
+/* Channels of the default Windows output when the last port opened (0 = unknown), for the log. */
+static int device_channels;
 static Port *port_of(int32_t handle, int32_t *error) {
     int id=handle & 0xff;
     if ((handle & 0x3f000000)!=0x20000000 || id>=PORTS) { *error=ERR_INVALID_PORT; return NULL; }
@@ -137,8 +139,9 @@ static ABI int32_t audio_open(int32_t user, int32_t type, int32_t index, uint32_
     for (int c=0;c<8;++c) p->volume[c]=VOLUME_0DB;
     if (sdl_audio()) {
         SDL_AudioSpec device; int device_frames;
-        p->downmix=p->channels==8 && SDL_GetAudioDeviceFormat(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,&device,&device_frames)
-                   && device.channels==2;
+        const int known=SDL_GetAudioDeviceFormat(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,&device,&device_frames);
+        device_channels=known ? device.channels : 0;
+        p->downmix=p->channels==8 && known && device.channels==2;
         SDL_AudioSpec spec={p->is_float ? SDL_AUDIO_F32 : SDL_AUDIO_S16, p->downmix ? 2 : p->channels, 48000};
         p->stream=SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,&spec,NULL,NULL);
         if (p->stream) SDL_ResumeAudioStreamDevice(p->stream);
@@ -153,8 +156,8 @@ static ABI int32_t audio_open(int32_t user, int32_t type, int32_t index, uint32_
     }
     ++ports_opened;
     pthread_mutex_unlock(&table_lock);
-    printf("Runtime: audio port %d opened (type %d, %d ch, %s, %u frames%s)\n",id,type,p->channels,p->is_float ? "float" : "s16",length,
-           p->downmix ? ", downmixed to stereo" : "");
+    printf("Runtime: audio port %d opened (type %d, %d ch, %s, %u frames%s; Windows output %d ch)\n",id,type,p->channels,
+           p->is_float ? "float" : "s16",length,p->downmix ? ", downmixed to stereo" : "",device_channels);
     return (type<<16) | id | 0x20000000;
 }
 static ABI int32_t audio_close(int32_t handle) {

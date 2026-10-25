@@ -782,6 +782,12 @@ void runtime_memory_set_gpu_hooks(GpuRange map, GpuRange unmap, GpuRange invalid
     write_unlock();
     flush_hooks();
 }
+void runtime_memory_invalidate(uintptr_t address, uint64_t size) {
+    write_lock();
+    queue_hook(HOOK_INVALIDATE,address,size);
+    write_unlock();
+    flush_hooks();
+}
 /* Writes through the backing view; 0 when part of the range has no backing. */
 int runtime_memory_write_backing(uintptr_t address, const void *data, uint64_t size) {
     read_lock();

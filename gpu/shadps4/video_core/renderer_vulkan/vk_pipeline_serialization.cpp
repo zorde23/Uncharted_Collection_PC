@@ -25,6 +25,7 @@
 #include "shader_recompiler/frontend/control_flow_graph.h"
 #include "shader_recompiler/frontend/fetch_shader.h"
 #include "shader_recompiler/info.h"
+#include "shader_recompiler/ir/passes/ir_passes.h"
 #include "video_core/cache_storage.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "shader_recompiler/recompiler.h"
@@ -42,6 +43,13 @@ static constexpr u32 PipelineKeyVersion = 7u;   // uc3: shadPS4 nightly 23c4133 
 static u32 TranslatedBinaryVersion() {
     return ShaderBinaryVersion | (Shader::Gcn::ScopeSplitScalar() ? 0x10000u : 0u) |
            Shader::Uc3MovieFixKey();
+}
+// gow3: the cache name of a shader's SPIR-V. Shaders that get multi-wave LDS barriers
+// (GOW3_LDS_BARRIERS_MULTIWAVE, BilalReloaded) get a new name, so their binaries cached without
+// them are not found and only those shaders recompile.
+static std::string ShaderBinaryName(u64 pgm_hash, size_t perm_idx) {
+    return fmt::format("{:#018x}_{}{}", pgm_hash, perm_idx,
+                       Shader::Optimization::MultiwaveLdsBarriers(pgm_hash) ? "_lds4" : "");
 }
 } // namespace Serialization
 
@@ -622,7 +630,7 @@ void RegisterShaderBinary(std::vector<u32>&& spv, u64 pgm_hash, size_t perm_idx)
     }
 
     Storage::DataBase::Instance().Save(Storage::BlobType::ShaderBinary,
-                                       fmt::format("{:#018x}_{}", pgm_hash, perm_idx),
+                                       Serialization::ShaderBinaryName(pgm_hash, perm_idx),
                                        std::move(spv));
 }
 
@@ -826,7 +834,7 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) 
 
     std::vector<u32> spv{};
     Storage::DataBase::Instance().Load(Storage::BlobType::ShaderBinary,
-                                       fmt::format("{:#018x}_{}", program->info.pgm_hash, perm_idx),
+                                       Serialization::ShaderBinaryName(program->info.pgm_hash, perm_idx),
                                        spv);
     if (spv.empty()) {
         return false;
@@ -1145,8 +1153,8 @@ void PipelineCache::ReadWarmEntry(BackgroundWarmup& warm, std::vector<u8>&& data
                                    stage->perm_idx)) {
                     std::vector<u32> spv;
                     db.Load(Storage::BlobType::ShaderBinary,
-                            fmt::format("{:#018x}_{}", stage->program->info.pgm_hash,
-                                        stage->perm_idx),
+                            Serialization::ShaderBinaryName(stage->program->info.pgm_hash,
+                                                           stage->perm_idx),
                             spv);
                     if (!spv.empty()) {
                         const auto module_started = std::chrono::steady_clock::now();

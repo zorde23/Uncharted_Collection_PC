@@ -295,9 +295,36 @@ void TextureCache::CancelReadbacks(VAddr address, u64 size) {
     });
 }
 
+// uc3 (from SuperMedo's uncharted_pc 722df5f, GPL): U2's aiming autofocus renders the depth under
+// the crosshair down to a 1x1 R32F image that the game reads on the CPU to set the depth of field.
+// Render targets are not copied back to guest memory, so the CPU read a stale value: the focus sat
+// at about 2 m and everything behind Drake was blurred while aiming. GOW3_TINY_READBACK=1 (off by
+// default): images of at most 4x4 pixels (1x1 of any tiling, else linear) the GPU writes are copied
+// back after each use, written to guest memory once the GPU has done it, without waiting.
+bool TextureCache::TinyReadback(const Image& image) {
+    static const bool enabled = [] {
+        const char* env = std::getenv("GOW3_TINY_READBACK");
+        return env && env[0] == '1';
+    }();
+    const auto& size = image.info.size;
+    return enabled && image.info.guest_address != 0 && size.depth == 1 &&
+           size.width * size.height <= 16 &&
+           (!image.info.props.is_tiled || (size.width == 1 && size.height == 1));
+}
+
 // gow3: every copy is recorded first and the GPU is waited for once. A wait per image (as
 // before) left the GPU mostly idle in God of War III's gameplay, at about 2 FPS.
 void TextureCache::ProcessDownloadImages() {
+    {
+        std::unordered_set<ImageId> tiny;
+        {
+            std::unique_lock lock{download_images_mutex};
+            tiny.swap(tiny_download_images);
+        }
+        for (const ImageId image_id : tiny) {
+            DownloadImageMemory(image_id, false);
+        }
+    }
     if (deferred_readbacks) {
         // Upload workers must finish reading RAM before these pages become inaccessible.
         scheduler.WaitHostCopies();
@@ -1517,6 +1544,9 @@ ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc, Vi
             image.info.guest_address != 0) {
             std::unique_lock lk{download_images_mutex};
             download_images.emplace(image_id);
+        } else if (TinyReadback(image)) {
+            std::unique_lock lk{download_images_mutex};
+            tiny_download_images.emplace(image_id);
         }
     }
     if (refresh) {
@@ -1549,6 +1579,9 @@ ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& des
     if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8)) {
         std::unique_lock lk{download_images_mutex};
         download_images.emplace(image_id);
+    } else if (TinyReadback(image)) {
+        std::unique_lock lk{download_images_mutex};
+        tiny_download_images.emplace(image_id);
     }
     image.usage.render_target = 1u;
     UpdateImage(image_id);
@@ -1965,7 +1998,14 @@ void TextureCache::GarbageCollectImages() {
             const char* env = std::getenv("GOW3_GC_BUDGET_MB");
             return env ? std::strtoull(env, nullptr, 10) << 20 : 0;
         }();
-        if (instance.IsIntegrated() || forced_budget) {
+        // GOW3_GC_LIVE_BUDGET=1: the same rule on dedicated GPUs. At startup the limits keep 60% of
+        // the budget free on cards up to 8 GB: a friend's RTX 3070 (6.3 GB budget at 1440p in UC2)
+        // evicted images from 2.5 GB on, all session long; with this it starts at 85% (5.4 GB).
+        static const bool live_budget = [] {
+            const char* env = std::getenv("GOW3_GC_LIVE_BUDGET");
+            return env && env[0] == '1';
+        }();
+        if (instance.IsIntegrated() || forced_budget || live_budget) {
             const u64 budget = forced_budget ? forced_budget : instance.GetDeviceMemoryBudgetNow();
             if (budget != 0) {
                 trigger_gc_memory = budget / 10 * 7;
@@ -2184,6 +2224,7 @@ void TextureCache::DeleteImage(ImageId image_id) {
         if (download_images.contains(image_id)) {
             download_images.erase(image_id);
         }
+        tiny_download_images.erase(image_id);
     }
 
     // Reclaim image and any image views it references.

@@ -523,6 +523,7 @@ static int u1_rewrite_log(void) {
     return on;
 }
 static volatile int aim_held;             /* L2 is held: the aiming camera (also while it blends in) */
+static volatile uint64_t aim_press_us;    /* when aim_held went on */
 /* The mouse sensitivity now: times mouse_aim_sensitivity while aiming. */
 static float mouse_sensitivity(void) { return mouse_cfg.sensitivity*(aim_held ? mouse_cfg.aim_sensitivity : 1.0f); }
 static float follow_target;               /* wanted heading (degrees) */
@@ -743,6 +744,22 @@ static void follow_take_pending(uint64_t camera, float *dir, uint64_t now) {
         return;
     }
 }
+/* GOW3_MOUSE_U1_AIM_GAP=1 (test, off by default): aim held for 150 ms with no aiming camera yet (the game
+ * has not switched to it, or does not aim there) while the follow camera runs: the follow camera keeps
+ * the mouse, as without aim, instead of the stick (2026-10-25 log: 8 such stretches in 50 min) */
+static volatile uint64_t aim_hook_us, edge_hook_us, car_hook_us, gun_hook_us; /* below */
+static int u1_aim_gap_on(void) {
+    static int on=-1;
+    if (on<0) { const char *v=getenv("GOW3_MOUSE_U1_AIM_GAP"); on=v && v[0]=='1'; if (on) printf("Mouse: U1 follow camera keeps the mouse while aim waits for the aiming camera (GOW3_MOUSE_U1_AIM_GAP)\n"); }
+    return on;
+}
+static int u1_aim_gap(uint64_t now) {
+    if (!follow_u1 || !aim_held || !u1_aim_gap_on() || !aim_press_us || now-aim_press_us<150000) return 0;
+    if (!camera_hook_us || now-camera_hook_us>=100000) return 0;
+    if (aim_hook_us && now-aim_hook_us<100000) return 0;
+    if ((edge_hook_us && now-edge_hook_us<100000) || (car_hook_us && now-car_hook_us<100000) || (gun_hook_us && now-gun_hook_us<100000)) return 0;
+    return 1;
+}
 /* arc_degrees: the camera pitch one unit of arc covers (U1 61; measured in U2 about 135, in U3 about 105) */
 static void follow_camera(uint64_t camera, uint32_t dir_offset, uint32_t arc_offset, float arc_degrees) {
     if (follow_off || !camera) return;
@@ -759,7 +776,8 @@ static void follow_camera(uint64_t camera, uint32_t dir_offset, uint32_t arc_off
     }
     camera_hook_us=now;
     const float heading=heading_of(dir);
-    if (follow_u1 && !aim_held && (!follow_turned_obj || camera==follow_turned_obj)) { u1_follow_seen_heading=heading; u1_follow_seen_us=now; }
+    const int aim_gap=u1_aim_gap(now);
+    if (follow_u1 && (!aim_held || aim_gap) && (!follow_turned_obj || camera==follow_turned_obj)) { u1_follow_seen_heading=heading; u1_follow_seen_us=now; }
     /* HOLD_INPUT: a follow object called while the mouse object has not been for 50 ms is the mouse object now
      * (the game swapped objects): the hold and the direct writes go to it, its own heading is the target */
     if (follow_u1 && u1_hold_input_on() && follow_turned_obj && camera!=follow_turned_obj && now-follow_turned_call_us>50000) {
@@ -771,7 +789,7 @@ static void follow_camera(uint64_t camera, uint32_t dir_offset, uint32_t arc_off
     if (camera==follow_turned_obj) follow_turned_call_us=now;
     float dx, dy;
     camera_take(0,&dx,&dy);
-    if (aim_held) { /* the aiming camera takes the mouse */
+    if (aim_held && !aim_gap) { /* the aiming camera takes the mouse */
         follow_moved_us=0; follow_pending=0; follow_others_held=0.0f;
         if (follow_fast) { follow_fast=0; follow_direct=1; follow_correction=0.0f; follow_relock=1; }
         if (follow_u1) u1_follow_follows_aim(dir);
@@ -1191,7 +1209,8 @@ static void __attribute__((ms_abi)) u1_joypad_sticks(uint64_t unused0, uint64_t 
     const float scale=MOUSE_DEGREES_PER_PIXEL*mouse_sensitivity()/dt;
     const int following=camera_hook_us && now-camera_hook_us<50000;
     float push=0.0f;
-    if (!aim_held && following && follow_direct) { /* the follow camera turned itself */
+    const int no_aim=!aim_held || u1_aim_gap(now); /* GOW3_MOUSE_U1_AIM_GAP: aiming without an aiming camera */
+    if (no_aim && following && follow_direct) { /* the follow camera turned itself */
         dx=dy=0.0f;
         push=follow_push;
     }
@@ -1209,9 +1228,9 @@ static void __attribute__((ms_abi)) u1_joypad_sticks(uint64_t unused0, uint64_t 
     if (gun_hook_us && now-gun_hook_us<100000) dx=dy=0.0f; /* so did the mounted gun */
     if (!aim_held && !following && !cover_off && cover_hook_us && now-cover_hook_us<100000 && cover_direct)
         dx=dy=0.0f; /* so did the cover camera */
-    float (*curve)(float)=aim_held ? aim_stick : follow_stick;
+    float (*curve)(float)=no_aim ? follow_stick : aim_stick;
     /* following through the joypad: the shortfall is made up within about a quarter second */
-    const float extra=!aim_held && following && !follow_direct ? follow_correction*4.0f : 0.0f;
+    const float extra=no_aim && following && !follow_direct ? follow_correction*4.0f : 0.0f;
     float x=curve(dx*scale+extra)+push;
     if (!aim_held && following && !follow_direct && follow_fast && now-follow_fast_us<100000) { /* the deficit already holds the mouse's turns */
         const float d=follow_correction;
@@ -2817,7 +2836,8 @@ static void sample_host(PadData *d) {
     pthread_mutex_unlock(&camera_lock);
     /* GOW3_MOUSE_DEBUG: the mouse is a stick while aiming (aim camera hook silent or keeping no
      * turns), with the age of each camera hook; at most once a second. */
-    if (mouse_debug() && captured && aim_held && !(aiming && aim_direct) && !(edging && edge_direct)) {
+    const int aim_gap=u1_aim_gap(now);
+    if (mouse_debug() && captured && aim_held && !aim_gap && !(aiming && aim_direct) && !(edging && edge_direct)) {
         static uint64_t stick_log_us;
         if (!stick_log_us || now-stick_log_us>=1000000) {
             stick_log_us=now;
@@ -2831,8 +2851,8 @@ static void sample_host(PadData *d) {
         }
     }
     const int aim_turns=(aim_held && aiming && aim_direct) || (!aim_held && covering && cover_direct) || (edging && edge_direct) || car;
-    const int direct_x=joypad || aim_turns || (following && !aim_held && follow_direct);
-    const int direct_y=joypad || aim_turns || (following && !aim_held && follow_direct && follow_has_arc);
+    const int direct_x=joypad || aim_turns || (following && (!aim_held || aim_gap) && follow_direct);
+    const int direct_y=joypad || aim_turns || (following && (!aim_held || aim_gap) && follow_direct && follow_has_arc);
     /* Mouse look as a stick: the mouse's speed, smoothed over 12 ms (reports arrive in bursts), as
      * a turn rate on the right stick, unless a right stick key is held. */
     if (!captured || (direct_x && direct_y)) { mouse_vx=mouse_vy=0; mouse_last_us=0; return; }
@@ -2972,6 +2992,7 @@ static void sample(PadData *d) {
     if (injected.buttons & BTN_R2) d->r2=255;
     uint8_t *axes[4]={&d->left_x,&d->left_y,&d->right_x,&d->right_y};
     for (int i=0;i<4;++i) if (injected.stick[i]>=0) *axes[i]=(uint8_t)injected.stick[i];
+    if ((d->buttons & BTN_L2) && !aim_held) aim_press_us=now_us();
     aim_held=(d->buttons & BTN_L2)!=0;
     /* U2, U3 (no joypad callback): the right stick held a little while the mouse turns the follow
      * camera's direction (follow_push, see follow_camera), unless the stick is in use */

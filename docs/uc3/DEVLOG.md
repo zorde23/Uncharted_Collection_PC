@@ -4,6 +4,29 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-25 — 0.3.7 (beta): vídeo congelado, memória de textura, foco da mira do UC2, roupa do Sully, surround, launcher
+
+Nada disto está commitado ainda. Tudo desligado no código; o launcher liga.
+
+- **Vídeo congelado no UC2** (`GOW3_VIDEO_INVALIDATE`, `src/runtime_videodec2.c`, `runtime_memory_invalidate` em `src/runtime_memory.c`). Log de um amigo (RTX 3070, 1440p): uma cutscene em vídeo (neve, depois do trem) parou numa imagem e o som continuou. O decodificador copia cada quadro para a memória do jogo, mas o cache de texturas estava acima do orçamento a sessão toda e descartou a imagem do vídeo na hora em que ele começou. Agora cada quadro marca a memória como suja (`Rasterizer::InvalidateMemory`, como o avplayer do shadPS4), ao custo de um dreno por quadro de vídeo. Não reproduzido no PC do Matheus (3000 e 2200 MB de orçamento forçado, 4K, com o save do telhado); o do amigo levou umas 3,5 h.
+- **Memória de textura em placas de até 8 GB** (`GOW3_GC_LIVE_BUDGET`, `texture_cache.cpp`). A fórmula de início deixava 60% do orçamento livre nessas placas (na 3070 do amigo, pressão em ~2,5 GB de ~6,3 GB). Com a opção, as placas dedicadas usam a regra das integradas: o orçamento atual do driver, 70/85/95%. Aumentar o orçamento fixo foi descartado (placa de 8 GB começaria a paginar).
+- **Tela toda borrada ao mirar no UC2** (`GOW3_TINY_READBACK`, só UC2). O foco automático desenha a profundidade sob a mira num alvo 1x1 que a CPU lê; render targets não voltavam para a CPU e o foco ficava em ~2 m. Port do SuperMedo 722df5f (Umar-Qayyum-dev, GPL).
+- **Camisa do Sully esticada no UC3, só NVIDIA** (`GOW3_LDS_BARRIERS_MULTIWAVE`, `shared_memory_barrier_pass.cpp`). Os shaders de tecido (cs 1c957b01 e 809864d3) precisam de barreiras entre as duas metades de 32 lanes de uma wave64. Port do SuperMedo 754ed2a (de BilalReloaded, GPL). Só esses dois shaders recompilam (sufixo `_lds4` no cache). Precisa de testador com NVIDIA.
+- **Som surround 5.1/7.1** (`GOW3_AUDIO_SURROUND`, opção Experimental do launcher nos três jogos). A saída já passava 8 canais para o Windows; o jogo mixava em estéreo porque o port dizia ter 2 canais. O log agora mostra "Windows output N ch". Testador: quem pediu no GitHub.
+- **Crash do UC1 ao sair da arma montada** (só no .bat de teste). Dois crashes sem linha "Fault", logo depois de sair da arma montada. O `run.py` agora escreve o código de saída no fim do log: `0x80000004` (breakpoint de hardware). Era o diagnóstico `GOW3_MOUSE_U1_GUN_LOG`, que vigia a câmera da arma com registradores de debug. Saiu do .bat; o launcher nunca teve. Sessão seguinte: 95 min sem crash, A1 em modo sombra com 0 divergências.
+- **Mouse do UC1 ao começar a mirar** (`GOW3_MOUSE_U1_AIM_GAP`, `runtime_pad.c`, só no .bat de teste). Com o botão direito segurado e a câmera de mira ainda sem entrar, o mouse ia para o analógico. Agora, depois de 150 ms, a câmera normal continua com o mouse direto, e a de mira começa de onde ela parou.
+- **Launcher:** botão ✕ para limpar a pasta do jogo e a do update; o CUSA02826 é reconhecido como dump com o 01.02 embutido (o `param.sfo` dele diz `APP_VER` 01.00 e `VERSION` 01.02; agora vale o maior); com o 01.02 embutido, a escolha do update fica bloqueada; escolher a pasta de fora (`CUSA01398` com `CUSA01398\CUSA01398` dentro, como o extrator deixa) entra sozinho na de dentro; versão 0.3.7-beta2.
+- **Em aberto:** pelo de lobo azul brilhante no UC2 (caverna de gelo); trava no logo da Bluepoint (uma vez); duas classes de câmera do UC1 sem mouse (0xbb8f0, 0xbbdc0), provavelmente de cena.
+
+## 2026-10-24 — v0.3.6: queda de FPS da 0.3.4 corrigida, mouse do UC1, crash dos Intel 12ª geração+
+
+- **Queda de FPS desde a 0.3.4** (Cidadela 45-48 → 36-38). Causa: um `getenv("GOW3_DUMP_IMAGES")` a cada draw no `DumpOnDraw`. Agora é lido uma vez.
+- **Crash nos Intel 12ª geração ou mais novos** (`GOW3_RED_ZONE`, ligado para todos). O Windows escreve o quadro da exceção abaixo do rsp, em cima da red zone de funções folha do jogo. Port do PR 403 do SuperMedo (d4rksp4rt4n, do port do Bloodborne). 116/225/248 pontos protegidos no UC1/UC2/UC3.
+- **Mouse do UC1** ligado no launcher: andar e escadas (`HOLD_INPUT` e as três regras do Fable), arma montada (modo arma), torreta do carro e jet ski.
+- **Experimental:** `GOW3_PREP_WORKERS=2`, pode ajudar CPUs de 4 e 6 núcleos.
+- **Estudo de FPS fechado:** A2+A3, A4 e etapa B não deram ganho. O D1 (kick de fence preguiçoso, `GOW3_LAZY_FENCE_KICK`) deu +~1 FPS e ficou desligado.
+- UC1 e UC2 marcados como jogáveis, ainda com alguns travamentos.
+
 ## 2026-10-23 — v0.3.5: manchas vermelhas do bloom, ícones de teclado e de Xbox, correções do UC3 no UC1 e UC2, proteção do crash do UC1
 
 - **Manchas vermelhas redondas (UC3, todas as placas)** (`GOW3_OVERLAP_KEEP_VIEW`, `texture_cache.cpp`). Começou como "só NVIDIA" (RTX 3070 de um amigo), mas apareceu também no AMD do Matheus, na escada do cap. 4 (Londres). Os dumps dos mips (`GOW3_DUMP_MIPS=1`, no tonemap ps 3371ae8d) mostraram os mips 1 e 2 do bloom com uma cena velha e um retalho de 120x67 no canto do mip 0. Causa: o laço de sobreposição do `FindImage` zerava o mip/camada achado a cada imagem; uma tabela 512x512 (fmt 83, 0x1145620000) que divide a memória com os mips 1-2 devolvia {imagem, -1, -1}, e o render target do mip caía no mip 0. Correção: o laço mantém o mip/camada quando a imagem seguinte só se sobrepõe por acaso. Desligado no código, **sempre ligado pelo launcher nos três jogos**. Testes negativos, que ficaram desligados ou foram removidos: layout GENERAL no lugar do feedback loop, limpar mips indefinidos, limpar NaN.

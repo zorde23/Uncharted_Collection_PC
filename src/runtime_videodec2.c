@@ -225,6 +225,13 @@ static int32_t picture(Decoder *d, FrameBuffer *buffer, OutputInfo *out) {
     info.frame_crop_bottom_offset=rows-height;
     info.colour_primaries=(uint8_t)d->frame->color_primaries;
     memcpy(luma+size,&info,sizeof(info));
+    /* uc3: GOW3_VIDEO_INVALIDATE=1 tells the texture cache that the picture changed, as shadPS4's
+     * AvPlayer does after each frame. A friend's UC2 (RTX 3070, 1440p, the texture cache over
+     * budget) once kept showing one picture of a video while its sound went on: the write faults
+     * alone likely stopped marking the video image dirty after evictions (not reproduced). */
+    static int invalidate=-1;
+    if (invalidate<0) { const char *e=getenv("GOW3_VIDEO_INVALIDATE"); invalidate=e && e[0]=='1'; }
+    if (invalidate) runtime_memory_invalidate((uintptr_t)luma,size+sizeof(info));
     if (!decoded_frames++) printf("Runtime: Videodec2 first picture %ux%u (pitch %u), game buffer %p, %llu bytes\n",width,height,pitch,
                                   buffer->frame_buffer,(unsigned long long)buffer->frame_buffer_size);
     return 0;

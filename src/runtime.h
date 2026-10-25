@@ -26,6 +26,8 @@ void runtime_mutex_report(void);
 uintptr_t runtime_memory_resolve(const char *name);
 void runtime_memory_report(void);
 int runtime_memory_is_mapped(uintptr_t address, uint64_t size);
+/* uc3: tells the GPU caches that host code wrote this guest range (as a CPU write fault would). */
+void runtime_memory_invalidate(uintptr_t address, uint64_t size);
 int runtime_memory_region_backing(uintptr_t address, uintptr_t *start, uintptr_t *end, int *mapped,
                                   const unsigned char **backing);
 const char *runtime_import_name(const char *name);

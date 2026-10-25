@@ -249,7 +249,10 @@ def main():
                    '--user', str(user_dir),
                    '--timeout', env.get('GOW3_TIMEOUT', '0'), *args]
         # No stdin: an inherited pipe (shells such as Git Bash) cost the game its console output.
-        return subprocess.run(command, stdin=subprocess.DEVNULL, creationflags=no_console()).returncode
+        code = subprocess.run(command, stdin=subprocess.DEVNULL, creationflags=no_console()).returncode
+        # uc3: a death that skips the fault handler (stack overflow, fast fail) leaves only this code.
+        print(f'Game process ended: exit code {code & 0xffffffff:#010x}', file=sys.stderr, flush=True)
+        return code
     finally:
         if mod_view:
             shutil.rmtree(mod_view, ignore_errors=True)

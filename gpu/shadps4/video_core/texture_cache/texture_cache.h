@@ -502,6 +502,11 @@ private:
     Common::LeastRecentlyUsedCache<ImageId, u64> lru_cache;
     Common::LeastRecentlyUsedCache<u64, u64> sampler_lru_cache;
     const bool readback_linear_images;
+    /// uc3: tiny render results (a few pixels) the game reads on the CPU, copied back to guest
+    /// memory without waiting (TinyReadback, GOW3_TINY_READBACK).
+    std::unordered_set<ImageId> tiny_download_images;
+    /// uc3: whether the image is such a result: at most 4x4 pixels, linear or 1x1.
+    [[nodiscard]] static bool TinyReadback(const Image& image);
     const bool deferred_readbacks = [] {
         const char* value = std::getenv("GOW3_DEFERRED_READBACK");
         return value && value[0] == '1';

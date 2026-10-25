@@ -39,7 +39,7 @@ LOG_FILE = USER_DIR / 'last_run.log'
 INPUT_FILE = DATA_DIR / 'input.ini'
 APP_NAME = 'Uncharted Collection PC'
 EXE_NAME = 'Uncharted Launcher.exe'
-VERSION = '0.3.6'
+VERSION = '0.3.7-beta2'
 RELEASES_API = 'https://api.github.com/repos/zorde23/Uncharted_Collection_PC/releases/latest'
 RELEASES_PAGE = 'https://github.com/zorde23/Uncharted_Collection_PC/releases/latest'
 NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
@@ -73,23 +73,34 @@ GAMES = [
       'GOW3_MOUSE_STEADY': '1', 'GOW3_MOUSE_AIM_U1_POST': '1', 'GOW3_MOUSE_U1_LEASH': '1',
       'GOW3_MOUSE_U1_PER_OBJ': '1', 'GOW3_MOUSE_U1_SWAP_SNAP': '1', 'GOW3_MOUSE_U1_AIM_PHASE': '1',
       'GOW3_MOUSE_U1_AIM_SEED_FOLLOW': '1', 'GOW3_MOUSE_U1_FAST_STICK': '1', 'GOW3_MOUSE_U1_HOLD_INPUT': '1',
-      'GOW3_MOUSE_U1_GUN': '1', 'GOW3_MOUSE_U1_CAR': '1', 'GOW3_MOUSE_PUSH': '0'}),
+      'GOW3_MOUSE_U1_GUN': '1', 'GOW3_MOUSE_U1_CAR': '1', 'GOW3_MOUSE_PUSH': '0',
+      # 0.3.7: videos keep updating (frozen picture), texture memory limit from the driver's budget.
+      'GOW3_VIDEO_INVALIDATE': '1', 'GOW3_GC_LIVE_BUDGET': '1'}),
     ('uc2', 'Uncharted 2: Among Thieves', 'big2-ps4_Shipping.elf', ('Jogável', 'Playable'),
      # Without GOW3_COMPUTE_PIPE: with it the train carriage in the prologue falls too early. The two
      # in-order options keep the rooftop at 60 FPS; the train jump is still timing-sensitive with them.
      {'GOW3_HLE_INORDER': '1', 'GOW3_ACB_DISPATCH_PIPE': '1', 'GOW3_READBACK_SIDEQ': '1',
       # From UC3 (2026-10-22, Matheus); COMPUTE_PIPE stays off (train).
       'GOW3_SYNC_SMALL_TARGETS': '1', 'GOW3_JOB_SPIN': '100', 'GOW3_JOB_SLEEP': '1', 'GOW3_MIP_FIX': '1',
-      'GOW3_SCOPE_SPLIT_SCALAR': '1', 'GOW3_DEPTH_KEEP_CLEAR': '1'}),
+      'GOW3_SCOPE_SPLIT_SCALAR': '1', 'GOW3_DEPTH_KEEP_CLEAR': '1',
+      # 0.3.7: aim focus without whole-screen blur (Umar-Qayyum-dev, Supermedo's uncharted_pc), videos
+      # keep updating, texture memory limit from the driver's budget.
+      'GOW3_TINY_READBACK': '1', 'GOW3_VIDEO_INVALIDATE': '1', 'GOW3_GC_LIVE_BUDGET': '1'}),
     # uc3 without GOW3_READBACK_SIDEQ: with it Drake's scarf jumps around in the desert (the guest
     # resumes before the graphics work behind a readback runs); no FPS difference measured.
     ('uc3', "Uncharted 3: Drake's Deception", 'big3-ps4_Shipping.elf', ('Jogável · 60 FPS', 'Playable · 60 FPS'),
      {'GOW3_COMPUTE_PIPE': '1', 'GOW3_SYNC_SMALL_TARGETS': '1', 'GOW3_JOB_SPIN': '100', 'GOW3_JOB_SLEEP': '1',
       'GOW3_MIP_FIX': '1', 'GOW3_MOUSE_EDGE_AIM': '1', 'GOW3_SCOPE_SPLIT_SCALAR': '1',
-      'GOW3_DEPTH_KEEP_CLEAR': '1'}),
+      'GOW3_DEPTH_KEEP_CLEAR': '1',
+      # 0.3.7: Sully's shirt on NVIDIA (BilalReloaded, via Supermedo's uncharted_pc), videos keep
+      # updating, texture memory limit from the driver's budget.
+      'GOW3_LDS_BARRIERS_MULTIWAVE': '1', 'GOW3_VIDEO_INVALIDATE': '1', 'GOW3_GC_LIVE_BUDGET': '1'}),
 ]
 # Off unless chosen in Options > Advanced (launcher.json 'experimental'): (games, value).
-EXPERIMENTAL = {'GOW3_PREP_TRUST_A1': (('uc3',), '1'), 'GOW3_PREP_WORKERS': (('uc1', 'uc2', 'uc3'), '2')}
+EXPERIMENTAL = {'GOW3_PREP_TRUST_A1': (('uc3',), '1'), 'GOW3_PREP_WORKERS': (('uc1', 'uc2', 'uc3'), '2'),
+                # 0.3.7: the game mixes 7.1 when told the output has 8 channels (sceAudioOutGetPortState);
+                # the port passes them to a 5.1/7.1 Windows output, or folds them to stereo.
+                'GOW3_AUDIO_SURROUND': (('uc1', 'uc2', 'uc3'), '1')}
 # ucndc.ini values the games were tested with, written when the file does not exist yet.
 # Only keys the Uncharted games use (render_resolution, engine_fps, fsr1, rcas and upscaler are GoW3 patches).
 INI_DEFAULTS = {'display_mode': 'windowed', 'vsync': '1', 'fps_limit': '0',
@@ -147,10 +158,18 @@ TOGGLE_HELP = {
     'GOW3_PREP_TRUST_A1': ('Experimental: preparo de desenhos mais rápido (+FPS, UC3)', 'Experimental: faster draw preparation (+FPS, UC3)'),
     'GOW3_PREP_WORKERS': ('Experimental: 2 threads de preparo (pode ajudar CPUs de 4 e 6 núcleos)', 'Experimental: 2 preparation threads (may help 4 and 6 core CPUs)'),
     'GOW3_JOB_SLEEP': ('Threads de jobs podem dormir no gameplay (menos CPU)', 'Job threads may sleep in gameplay (less CPU)'),
+    'GOW3_AUDIO_SURROUND': ('Experimental: som surround 5.1/7.1 (caixas ou fone surround configurados no Windows)',
+                            'Experimental: 5.1/7.1 surround sound (speakers or surround headphones set up in Windows)'),
+    'GOW3_TINY_READBACK': ('Foco da mira sem borrar a tela (UC2)', 'Aim focus without blurring the screen (UC2)'),
+    'GOW3_LDS_BARRIERS_MULTIWAVE': ('Roupa do Sully sem esticar em placas NVIDIA (UC3)', "Sully's shirt without stretching on NVIDIA cards (UC3)"),
+    'GOW3_VIDEO_INVALIDATE': ('Vídeos não congelam a imagem (UC1, UC2 e UC3)', 'Videos do not freeze on one picture (UC1, UC2 and UC3)'),
+    'GOW3_GC_LIVE_BUDGET': ('Limite de memória de texturas pelo que a placa tem livre (menos descarte em placas de 8 GB)',
+                            'Texture memory limit from what the card has free (fewer evictions on 8 GB cards)'),
 }
 # Options > Advanced shows the toggles in two lists: these fix bugs, the others are for performance.
 FIX_TOGGLES = {'GOW3_MOUSE_AIM_U1_ALL', 'GOW3_SYNC_SMALL_TARGETS', 'GOW3_MIP_FIX', 'GOW3_MOUSE_EDGE_AIM',
-               'GOW3_SCOPE_SPLIT_SCALAR', 'GOW3_DEPTH_KEEP_CLEAR'}
+               'GOW3_SCOPE_SPLIT_SCALAR', 'GOW3_DEPTH_KEEP_CLEAR', 'GOW3_TINY_READBACK',
+               'GOW3_LDS_BARRIERS_MULTIWAVE', 'GOW3_VIDEO_INVALIDATE'}
 # The Uncharted engines run at 60 at most, so higher limits would do nothing.
 FPS_LIMITS = [('0', ('Sem limite (60)', 'No limit (60)')), ('30', ('30', '30')), ('60', ('60', '60'))]
 # Fixed per game, never a user switch: UC1 needs LOW_IMAGE, AJM_END_RULES and EOP_TICK_WAIT; READBACKS
@@ -293,12 +312,20 @@ def is_update(folder):
 
 
 def app_version(folder):
-    """APP_VER of a dump folder ("01.00" base, "01.02" updated), or None."""
+    """The game version of a dump folder ("01.00" base, "01.02" updated), or None: APP_VER, or VERSION when
+    higher (CUSA02826 ships the 01.02 executables in its base package: APP_VER 01.00, VERSION 01.02)."""
     try:
-        from patches import game_app_version
-        return game_app_version(folder)
-    except ImportError:
+        from prepare import sfo
+        params = sfo((Path(folder) / 'sce_sys' / 'param.sfo').read_bytes())
+    except (OSError, ValueError, ImportError):
         return None
+    def key(v):
+        try:
+            return tuple(int(n) for n in v.split('.'))
+        except (AttributeError, ValueError):
+            return ()
+    versions = [v for v in (params.get('APP_VER'), params.get('VERSION')) if key(v)]
+    return max(versions, key=key) if versions else None
 
 
 def has_update_merged(folder):
@@ -317,6 +344,14 @@ def has_games(folder):
 def has_base_data(folder):
     """The base game's shared data (an update folder brings only what changed)."""
     return (Path(folder) / 'shareddata').is_dir()
+
+
+def inner_dump(folder):
+    """The dump inside a folder of the same name (CUSA01398\\CUSA01398, as pkg extractors leave it)."""
+    nested = Path(folder) / Path(folder).name
+    if not has_games(folder) and not is_update(folder) and nested.is_dir() and (has_games(nested) or is_update(nested)):
+        return str(nested).replace('\\', '/')
+    return folder
 
 
 def guess_update(game_dir):
@@ -763,20 +798,25 @@ class Launcher:
         box.pack(fill='x', padx=24, pady=8)
         inner = tk.Frame(box, bg=PANEL)
         inner.pack(fill='x', padx=16, pady=12)
-        self.label(inner, _('1. Seu dump do PS4', '1. Your PS4 dump'), 11, TEXT, True).grid(row=0, column=0, sticky='w', columnspan=3)
+        self.label(inner, _('1. Seu dump do PS4', '1. Your PS4 dump'), 11, TEXT, True).grid(row=0, column=0, sticky='w', columnspan=4)
         self.game_var = tk.StringVar(value=self.settings['game_dir'])
         self.update_var = tk.StringVar(value=self.settings['update_dir'])
-        for row, (title, var, command) in enumerate((
-                (_('Pasta do jogo', 'Game folder'), self.game_var, self.pick_game),
-                (_('Atualização (01.02)', 'Update (01.02)'), self.update_var, self.pick_update)), start=1):
+        for row, (title, var, command, key) in enumerate((
+                (_('Pasta do jogo', 'Game folder'), self.game_var, self.pick_game, 'game_dir'),
+                (_('Atualização (01.02)', 'Update (01.02)'), self.update_var, self.pick_update, 'update_dir')), start=1):
             self.label(inner, title, 10, MUTED).grid(row=row, column=0, sticky='w', pady=3)
             entry = tk.Entry(inner, textvariable=var, bg=CARD, fg=TEXT, insertbackground=TEXT, relief='flat',
                              font=('Segoe UI', 10), state='readonly', readonlybackground=CARD)
             entry.grid(row=row, column=1, sticky='we', padx=10, ipady=4)
-            self.button(inner, _('Escolher…', 'Browse…'), command).grid(row=row, column=2)
+            browse = self.button(inner, _('Escolher…', 'Browse…'), command)
+            browse.grid(row=row, column=2)
+            clear = self.button(inner, '✕', lambda key=key, var=var: self.clear_folder(key, var))
+            clear.grid(row=row, column=3, padx=(6, 0))
+            if key == 'update_dir':
+                self.update_buttons = (browse, clear)
         inner.columnconfigure(1, weight=1)
         self.dump_status = self.label(inner, '', 9, MUTED, justify='left', wraplength=680)
-        self.dump_status.grid(row=3, column=0, columnspan=3, sticky='w', pady=(6, 0))
+        self.dump_status.grid(row=3, column=0, columnspan=4, sticky='w', pady=(6, 0))
 
         # Games
         self.label(self.root, _('2. Escolha o jogo', '2. Pick a game'), 11, TEXT, True).pack(anchor='w', padx=24, pady=(10, 4))
@@ -823,6 +863,14 @@ class Launcher:
     def refresh(self):
         s = self.settings
         lines, ok = [], bool(s['game_dir'])
+        # the update is already in the game folder: nothing to pick
+        merged = bool(s['game_dir']) and has_update_merged(s['game_dir'])
+        if merged and s['update_dir']:
+            s['update_dir'] = ''
+            save_settings(s)
+        self.update_var.set(_('Já incluída na pasta do jogo', 'Already in the game folder') if merged else s['update_dir'])
+        for button in getattr(self, 'update_buttons', ()):
+            button.configure(state='disabled' if merged else 'normal', cursor='arrow' if merged else 'hand2')
         if not s['game_dir']:
             lines.append(_('Escolha a pasta do jogo (CUSA02344): a que tem eboot.bin, big2-ps4_Shipping.elf e big3-ps4_Shipping.elf.',
                            'Choose the game folder (CUSA02344): the one with eboot.bin, big2-ps4_Shipping.elf and big3-ps4_Shipping.elf.'))
@@ -863,6 +911,7 @@ class Launcher:
         folder = self.filedialog.askdirectory(title=_('Pasta do jogo (CUSA02344)', 'Game folder (CUSA02344)'))
         if not folder:
             return
+        folder = inner_dump(folder)
         base = guess_game(folder) if is_update(folder) else ''
         if is_update(folder) and (base or not has_games(folder) or not has_base_data(folder)):
             # the update was picked: use it as such and look for the game
@@ -879,6 +928,12 @@ class Launcher:
                 self.settings['update_dir'] = guess_update(folder)
         self.game_var.set(self.settings['game_dir'])
         self.update_var.set(self.settings['update_dir'])
+        save_settings(self.settings)
+        self.refresh()
+
+    def clear_folder(self, key, var):
+        self.settings[key] = ''
+        var.set('')
         save_settings(self.settings)
         self.refresh()
 
