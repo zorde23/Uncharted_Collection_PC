@@ -49,3 +49,6 @@ ucndc*.ini
 captures/
 # Local test scripts (the public ones live in windows/)
 /*.bat
+
+# Graphify (local code graph)
+graphify-out/

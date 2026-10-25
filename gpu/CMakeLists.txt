@@ -5,6 +5,8 @@ project(gow3gpu LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+# out/gpu/compile_commands.json for clangd (see .clangd).
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 if (NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE RelWithDebInfo)
 endif()

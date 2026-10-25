@@ -1,0 +1,4 @@
+CompileFlags:
+  CompilationDatabase: out/gpu
+  # MSYS2 CLANG64 defaults that clangd does not apply on its own (otherwise it assumes MSVC headers).
+  Add: [--target=x86_64-w64-windows-gnu, -stdlib=libc++]

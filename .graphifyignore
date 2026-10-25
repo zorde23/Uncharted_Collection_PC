@@ -1,0 +1,9 @@
+# Graph only this port's code (AST, no LLM cost): vendored libraries, backups and docs stay out.
+third_party/
+gpu/third_party/
+_claude/
+docs/
+*.md
+*.txt
+*.png
+*.mp3
