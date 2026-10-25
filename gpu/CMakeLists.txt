@@ -334,6 +334,10 @@ target_include_directories(camera-motion-test PRIVATE shim shadps4 ${SHADER_INCL
 target_compile_options(camera-motion-test PRIVATE -UNDEBUG -fPIC)
 target_link_libraries(camera-motion-test PRIVATE gow3gpu)
 add_dependencies(camera-motion-test host_shaders)
+if (WIN32)
+    target_sources(camera-motion-test PRIVATE ../src/compat_win.c)
+    target_link_libraries(camera-motion-test PRIVATE onecore)
+endif()
 
 # gow3: FSR 4 benchmark outside the game (tools/fsr4_bench.cpp): ninja -C out/gpu fsr4-bench.
 add_executable(upscaler-support-test EXCLUDE_FROM_ALL ../tests/test_upscaler_support.cpp

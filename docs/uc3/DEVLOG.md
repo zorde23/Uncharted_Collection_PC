@@ -4,6 +4,22 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-25 — Ferramentas do Claude Code e testes que não linkavam
+
+- **clangd**: o CMake exporta `out/gpu/compile_commands.json`; o `.clangd` aponta para ele com o
+  alvo MSYS2 (`x86_64-w64-windows-gnu`, libc++), senão o clangd usa os headers do MSVC.
+  **Graphify**: grafo só do código do port em `graphify-out/` (fora do git, `.graphifyignore`).
+  `CLAUDE.md` com as regras de build/jogo; `.claude/` com `/build-test` e os agentes
+  `conventions-reviewer` e `trace-analyst`.
+- **Testes**: no Windows o `build.sh` não compila testes, então quatro alvos pararam de linkar sem
+  ninguém ver: os stubs não tinham as funções novas do runtime (`runtime_input_*` da 0.3.2,
+  `runtime_aim_watch*`/`runtime_guest_*` da câmera do UC1, `runtime_memory_invalidate` da 0.3.7)
+  e o `camera-motion-test` não levava `compat_win.c` + `onecore`. Com os stubs, `pad-map`,
+  `pipeline-binary-cache`, `videodec2` e `camera-motion` passam: 34 alvos C/C++ passam; continuam
+  fora `scene-resolution`, `taa-shader` e `upscaler-support` (Lavapipe, `setenv`).
+
+---
+
 ## 2026-10-25 — 0.3.7 (beta): vídeo congelado, memória de textura, foco da mira do UC2, roupa do Sully, surround, launcher
 
 Nada disto está commitado ainda. Tudo desligado no código; o launcher liga.

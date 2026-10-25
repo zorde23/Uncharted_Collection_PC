@@ -4,6 +4,11 @@
 #include "../src/runtime_pad.c"
 
 int gow3gpu_overlay_captures_input(void) { return 0; }
+void gow3gpu_mouse_configure(int look) { (void)look; }
+volatile uint64_t runtime_image_base, runtime_guest_r14, runtime_guest_rbp, runtime_guest_ret;
+void runtime_aim_watch(uint64_t at0, uint64_t at1, int on) { (void)at0; (void)at1; (void)on; }
+void runtime_aim_watch_report(const char *what) { (void)what; }
+uint64_t runtime_aim_watch_last(int f) { (void)f; return 0; }
 uintptr_t runtime_lookup(const RuntimeExport *table, size_t count, const char *name) {
     (void)table; (void)count; (void)name;
     return 0;

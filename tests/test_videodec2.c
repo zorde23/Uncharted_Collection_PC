@@ -7,6 +7,7 @@
 #include <stdio.h>
 
 uintptr_t runtime_lookup(const RuntimeExport *table, size_t count, const char *nid) { (void)table; (void)count; (void)nid; return 0; }
+void runtime_memory_invalidate(uintptr_t address, uint64_t size) { (void)address; (void)size; }
 
 static unsigned char frame_buffer[1<<16];
 static int pictures, first_luma_sum, seen;

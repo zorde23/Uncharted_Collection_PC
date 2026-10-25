@@ -3,9 +3,9 @@
 set -uo pipefail
 cd -- "$(dirname -- "$0")/../../.."
 export PATH="/d/msys64/clang64/bin:/d/msys64/usr/bin:$PATH" MSYSTEM=CLANG64 MSYS2_ROOT=/d/msys64
-# Broken on Windows before this skill existed (2026-10-25): setenv, Lavapipe, test stubs missing
-# newer runtime symbols. Remove a name once it passes again.
-KNOWN=" camera-motion-test pad-map-test pipeline-binary-cache-test scene-resolution-test taa-shader-test upscaler-support-test videodec2-test "
+# Broken on Windows before this skill existed (2026-10-25): setenv, Lavapipe.
+# Remove a name once it passes again.
+KNOWN=" scene-resolution-test taa-shader-test upscaler-support-test "
 
 if tasklist | grep -qiE 'gow3-probe|ucndc'; then echo 'The game is running: close it first.' >&2; exit 2; fi
 bash build.sh || exit 1
