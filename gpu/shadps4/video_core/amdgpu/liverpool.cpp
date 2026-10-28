@@ -1667,7 +1667,12 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 } else if (event->event_index.Value() == EventIndex::ZpassDone) {
                     if (event->event_type.Value() == EventType::PixelPipeStatDump) {
                         static constexpr u64 OcclusionCounterValidMask = 0x8000000000000000ULL;
-                        static constexpr u64 OcclusionCounterStep = 0x2FFFFFFULL;
+                        // uc1 (white crates, diagnosis): GOW3_OCCLUSION_STEP=<n> replaces the step of
+                        // the fake pixel counter (0: every query reads "nothing drawn").
+                        static const u64 OcclusionCounterStep = [] {
+                            const char* env = std::getenv("GOW3_OCCLUSION_STEP");
+                            return env && env[0] ? u64(std::strtoull(env, nullptr, 0)) : 0x2FFFFFFULL;
+                        }();
                         u64* results = event->Address<u64*>();
                         for (s32 i = 0; i < num_counter_pairs; ++i, results += 2) {
                             *results = pixel_counter | OcclusionCounterValidMask;

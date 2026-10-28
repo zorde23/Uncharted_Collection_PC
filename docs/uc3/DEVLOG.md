@@ -4,6 +4,86 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-27 — Versão 0.3.7
+
+- Versão do launcher `0.3.7` (sem beta); zip `ucndc_pc-v0.3.7-windows.zip`. Junta a 0.3.7-beta2 (vídeo
+  congelado, memória de textura, foco da mira do UC2, roupa do Sully na NVIDIA, surround experimental,
+  botões ✕ e dump CUSA02826) com as Opções que rolam e o "Atualizar agora".
+- "Atualizar agora" testado no Windows pelo Matheus (`D:\Uncharted\teste_atualizacao.bat`, cópia separada,
+  `UC_PRETEND_VERSION=0.3.0`): baixou a Release do GitHub, trocou os arquivos e abriu de novo sozinho.
+- READMEs e LEIA-ME: "Novo na 0.3.7", como atualizar, créditos (BilalReloaded, Umar-Qayyum-dev) e o
+  problema conhecido das caixas claras do UC1. Foco da mira do UC2 e roupa do Sully seguem "em teste".
+- Ícone de girar no sentido horário do UC1 (patch do `chunk-1-tstrm.pak`) testado no gerador pelo Matheus em
+  28/10: mostra as teclas. Entra ligado na 0.3.7 (estilo Teclado).
+- Ficam no código, desligados, os diagnósticos das caixas do UC1 (`GOW3_U1_PROBE_LOG`,
+  `GOW3_TEST_PROBE_ALL_REGIONS`, `GOW3_CLOBBER_LOG`, `GOW3_HLE_DST_READBACK`) e o `GOW3_GUEST_MXCSR`.
+
+## 2026-10-27 — UC1: caixas claras, o ponto da luz desce para baixo do piso
+
+- O texto de 26/10 sobre descritor errado e readback atrasado não se confirmou (bissecção de uma
+  rodada por configuração; as texturas 2x2 são lisas de propósito). Análise com o Fable.
+- Ganchos de diagnóstico (`GOW3_U1_PROBE_LOG=1`, em `runtime_pad.c`): busca de sondas de luz
+  (0x4f70b0), mistura da luz por objeto (0x4f4ec0) e lista de regiões (0x5efd20), imagem 1.02.
+- Mecanismo: a luz de cada objeto é calculada no centro da caixa envolvente dele. Quando a caixa
+  quebra, o conteúdo afunda no piso (normal, o PS4 faz igual), o centro desce junto e, embaixo do
+  piso, a busca não acha sonda nenhuma e usa o céu padrão do jogo (claro). O cache de luz mistura
+  isso aos poucos e congela. Daí os pedaços claros um tempo depois.
+- `GOW3_GUEST_MXCSR=<hex>` (port do 0cf1277 do SuperMedo, desligado): o PS4 roda o jogo com
+  MXCSR 0x9fc0 (FTZ+DAZ). Testado com 9fc0: as caixas clarearam igual, não é a causa.
+- Suspeita atual: no PS4 a região de baixo do bunker (0x5dfe9ee1, ou a 0x9b8a10ef que nunca carrega
+  no port) entra na busca. `GOW3_TEST_PROBE_ALL_REGIONS=1` (teste, desligado) deixa a 0x5dfe9ee1
+  entrar. Teste: `D:\Uncharted\uc1_caixas_regioes.bat`.
+
+## 2026-10-27 — Launcher: Opções com rolagem e atualização pelo próprio launcher (issues do GitHub)
+
+- **Opções:** com o Avançado aberto a janela ficava mais alta (e larga) que telas pequenas e o
+  botão Salvar sumia. Agora os botões ficam fixos embaixo, a lista rola (roda do mouse e barras),
+  os textos das otimizações quebram linha e a janela abre centralizada no topo da tela.
+- **Atualizar agora:** quando sai versão nova, o aviso tem o botão "Atualizar agora" (só no exe).
+  O launcher baixa o zip `-windows.zip` da Release para `_update\`, descompacta, e o
+  `_update\update.bat` espera o launcher fechar, copia por cima com `robocopy /E` e abre o
+  launcher novo. Saves, `ucndc.ini` e `launcher.json` não estão no zip, então ficam. Erro: abre o
+  `update.log`. Beta agora conta como menor que a versão final (`0.3.7-beta2` < `v0.3.7`).
+- Só vale a partir da versão que tiver esse launcher; quem está numa anterior atualiza à mão uma vez.
+
+## 2026-10-26 — UC1: pedaços de caixa claros no bunker (investigação)
+
+- No bunker do UC1 ("O abrigo subterrâneo") alguns pedaços de caixa quebrada ficavam claros, como
+  sem luz. A captura mostrou o shader dos pedaços (ps 73113bf2) lendo duas texturas 2x2 de
+  tinta azul-marinho do `facility-0.pak` no lugar das da madeira: o descritor errado já estava
+  na memória do jogo.
+- Bissecção com .bat (save no slot 012): sem o A1 sombra não acontece. A sombra antiga
+  (`GOW3_PREP_TRUST=2`) e o A1 sem extras ficaram limpos. Com o A1 e só `GOW3_A1_READBACK_STAMP=1`
+  acontece. O carimbo só anota páginas e não escreve na memória do jogo, então ele só muda o
+  tempo. A suspeita é um readback que chega atrasado e cobre bytes que mudaram depois.
+- `GOW3_CLOBBER_LOG=1` (diagnóstico, desligado): guarda os bytes do jogo quando uma cópia de
+  readback é gravada (buffer async/fast, leaf, imagem adiada) e, logo antes de ela chegar,
+  imprime `uc3 clobber:` quando vai sobrescrever bytes que mudaram nesse meio-tempo.
+  Fica em `gow3_write_log.cpp`. Teste: `D:\Uncharted\uc1_caixas_clobber.bat`.
+- Resultado do log: uma imagem de 512 bytes em 0x103a910000 tinha um readback adiado pendente.
+  Uma escrita do próprio port (backing, não do jogo) gravava dados novos ali e, uns 10 ms
+  depois, o readback chegava com os bytes antigos por cima. Isso acontecia a cada poucos
+  segundos. O suspeito é a cópia escalar em HLE (`GOW3_SCALAR_COPY_HLE`), que escreve pela
+  backing sem passar pela proteção de página.
+- `GOW3_HLE_DST_READBACK=1` (desligado no código): antes da cópia HLE escrever, uma imagem
+  pequena que a GPU escreveu ali e está na fila de volta para a RAM (fim da submissão) volta
+  agora, e um readback adiado pendente chega antes. Assim fica a ordem da GPU (imagem, depois
+  cópia). A primeira versão só tratava o readback adiado e nunca agiu. Teste:
+  `D:\Uncharted\uc1_caixas_hle_dst.bat`.
+- O A1 sombra saiu do .bat de jogar UC1. No launcher o A1 continua Experimental e desligado.
+
+## 2026-10-26 — UC1: ícone de girar no sentido horário com teclas
+
+- No gerador antes do capítulo 19 o UC1 mostrava o analógico do controle mesmo com os ícones de
+  teclado. Os ícones de girar no sentido horário (`Rotate-Reverse*`) e os do analógico direito só
+  têm uma cópia de 32x64 no `particle.pak`; a grande vem por streaming do
+  `texturedict1/ps4/chunk-1-tstrm.pak` (1,4 GB), que a gente não trocava.
+- `hud_icons.make_hud_patch`: desenha as mesmas figuras nas texturas desse pak (mesmo layout) e grava
+  só os blocos mudados num `.patch` (~2,2 MB, 30 texturas). O launcher faz o arquivo em
+  `user\icones\...\chunk-1-tstrm.pak.patch` (só no estilo teclado).
+- Port (`runtime_file.c`): uma entrada `.patch` em `GOW3_ICON_FILES` não é montada no lugar do arquivo;
+  os bytes dela são aplicados em cima de cada leitura (`read`/`pread`) do arquivo do jogo.
+
 ## 2026-10-25 — Ferramentas do Claude Code e testes que não linkavam
 
 - **clangd**: o CMake exporta `out/gpu/compile_commands.json`; o `.clangd` aponta para ele com o

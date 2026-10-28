@@ -6,6 +6,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
+#include <unordered_map>
+#include <vector>
 #ifdef _WIN32
 #include <windows.h>
 #undef near
@@ -35,7 +38,8 @@ constexpr std::uint64_t Pattern = 0x0000005300000000ull;
 // uc3: GOW3_FAULT_WRITES=1, the last writes the GPU emulation made to guest memory past the page
 // tracker (readbacks, leaf downloads, backing writes), kept apart and cheap enough for normal
 // play, so a crash on corrupted guest data says which of them landed on it last.
-constexpr std::size_t FaultSize = 1 << 16;
+// uc1: 1M entries (40 MB): the ParticleTracker clobber may land many seconds before the crash.
+constexpr std::size_t FaultSize = 1 << 20;
 std::array<Entry, FaultSize> fault_ring;
 std::atomic<std::uint64_t> fault_head{0};
 constexpr std::uint32_t DownloadSource = 100;
@@ -123,6 +127,198 @@ void NoteDownload(std::uint64_t address, const void* data, std::uint64_t size) {
     }
 }
 
+namespace {
+struct ClobberSnapshot {
+    std::uint64_t address;
+    std::uint64_t tsc;
+    std::vector<unsigned char> bytes;
+};
+std::mutex clobber_mutex;
+std::unordered_map<const void*, ClobberSnapshot> clobber_snaps;
+std::uint64_t clobber_bytes = 0;
+constexpr std::uint64_t ClobberMaxCopy = 8ull << 20;
+constexpr std::uint64_t ClobberMaxTotal = 512ull << 20;
+
+// Guest bytes through the backing view (no page protection); false when not all mapped.
+bool ReadGuest(std::uint64_t address, unsigned char* out, std::uint64_t size) {
+    while (size != 0) {
+        std::uintptr_t start = 0, end = 0;
+        int mapped = 0;
+        const unsigned char* backing = nullptr;
+        if (!runtime_memory_region_backing(address, &start, &end, &mapped, &backing) || !mapped ||
+            !backing || end <= address) {
+            return false;
+        }
+        const std::uint64_t n = end - address < size ? end - address : size;
+        std::memcpy(out, backing, n);
+        out += n;
+        address += n;
+        size -= n;
+    }
+    return true;
+}
+} // namespace
+
+constexpr std::uint32_t SiteSource = 200;
+
+void NoteWriteSite(std::uint64_t address, std::uint64_t size, std::uint32_t site) {
+    // uc1 (ParticleTracker crash): image landings go in the fault ring with GOW3_FAULT_WRITES
+    // alone, so a crash report lists them without the costly GOW3_CLOBBER_LOG copies.
+    if (FaultWrites()) {
+        const std::uint64_t none = 0;
+        NoteFault(address, &none, size, SiteSource + site);
+    }
+}
+
+bool ClobberLog() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("GOW3_CLOBBER_LOG");
+        return env && env[0] == '1';
+    }();
+    return enabled;
+}
+
+void ClobberSnap(const void* key, std::uint64_t address, std::uint64_t size) {
+    if (!ClobberLog() || size == 0 || size > ClobberMaxCopy) {
+        return;
+    }
+    ClobberSnapshot snap{address, __rdtsc(), std::vector<unsigned char>(size)};
+    if (!ReadGuest(address, snap.bytes.data(), size)) {
+        return;
+    }
+    std::scoped_lock lk{clobber_mutex};
+    auto it = clobber_snaps.find(key);
+    if (it != clobber_snaps.end()) {
+        clobber_bytes -= it->second.bytes.size();
+        clobber_snaps.erase(it);
+    }
+    if (clobber_bytes + size > ClobberMaxTotal) {
+        return;
+    }
+    clobber_bytes += size;
+    clobber_snaps.emplace(key, std::move(snap));
+}
+
+void ClobberDrop(const void* key) {
+    if (!ClobberLog()) {
+        return;
+    }
+    std::scoped_lock lk{clobber_mutex};
+    auto it = clobber_snaps.find(key);
+    if (it != clobber_snaps.end()) {
+        clobber_bytes -= it->second.bytes.size();
+        clobber_snaps.erase(it);
+    }
+}
+
+void ClobberCheck(const void* key, std::uint64_t address, const void* data, std::uint64_t size,
+                  const char* site) {
+    if (!ClobberLog()) {
+        return;
+    }
+    ClobberSnapshot snap;
+    {
+        std::scoped_lock lk{clobber_mutex};
+        auto it = clobber_snaps.find(key);
+        if (it == clobber_snaps.end()) {
+            return;
+        }
+        clobber_bytes -= it->second.bytes.size();
+        snap = std::move(it->second);
+        clobber_snaps.erase(it);
+    }
+    static std::atomic<std::uint64_t> checked{0}, hit{0};
+    const std::uint64_t n = checked.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (snap.address != address || snap.bytes.size() != size) {
+        return;
+    }
+    std::vector<unsigned char> now(size);
+    if (!ReadGuest(address, now.data(), size)) {
+        return;
+    }
+    const auto* incoming = static_cast<const unsigned char*>(data);
+    std::uint64_t changed = 0, lost = 0, first = ~0ull, last = 0;
+    for (std::uint64_t i = 0; i < size; ++i) {
+        if (now[i] == snap.bytes[i]) {
+            continue;
+        }
+        ++changed;
+        if (incoming[i] != now[i]) {
+            ++lost;
+            first = first == ~0ull ? i : first;
+            last = i;
+        }
+    }
+    if (lost == 0) {
+        if ((n & 0xffff) == 0) {
+            std::printf("uc3 clobber log: %llu landings checked, %llu overwrote newer bytes\n",
+                        (unsigned long long)n, (unsigned long long)hit.load());
+        }
+        return;
+    }
+    const std::uint64_t h = hit.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (h > 200 && (h & 63) != 0) {
+        return;
+    }
+    std::printf("uc3 clobber: %s landing %#llx +%llu overwrites %llu newer bytes (%llu changed "
+                "since the copy, %.1f ms ago) at %#llx..%#llx; newer",
+                site, (unsigned long long)address, (unsigned long long)size,
+                (unsigned long long)lost, (unsigned long long)changed,
+                double(__rdtsc() - snap.tsc) / 3.0e6, (unsigned long long)(address + first),
+                (unsigned long long)(address + last));
+    const std::uint64_t at = first & ~7ull;
+    for (std::uint64_t i = at; i < at + 32 && i + 8 <= size; i += 8) {
+        std::uint64_t v;
+        std::memcpy(&v, now.data() + i, 8);
+        std::printf(" %016llx", (unsigned long long)v);
+    }
+    std::printf("; landing");
+    for (std::uint64_t i = at; i < at + 32 && i + 8 <= size; i += 8) {
+        std::uint64_t v;
+        std::memcpy(&v, incoming + i, 8);
+        std::printf(" %016llx", (unsigned long long)v);
+    }
+    std::printf("; before");
+    for (std::uint64_t i = at; i < at + 32 && i + 8 <= size; i += 8) {
+        std::uint64_t v;
+        std::memcpy(&v, snap.bytes.data() + i, 8);
+        std::printf(" %016llx", (unsigned long long)v);
+    }
+    std::printf(" (%llu)", (unsigned long long)h);
+    // GOW3_FAULT_WRITES=1: the emulation's own writes there since the copy (readbacks, backing
+    // writes); none means a guest write that the readback's page protection did not stop.
+    if (FaultWrites()) {
+        const std::uint64_t lo = address + first, hi = address + last + 1;
+        const std::uint64_t end = fault_head.load(std::memory_order_relaxed);
+        unsigned shown = 0;
+        std::printf("; emulation writes since:");
+        for (std::uint64_t i = end; i-- > (end > FaultSize ? end - FaultSize : 0) && shown < 6;) {
+            const Entry& e = fault_ring[i % FaultSize];
+            if (e.tsc < snap.tsc) {
+                break;
+            }
+            if (e.address >= hi || e.address + e.size <= lo) {
+                continue;
+            }
+            ++shown;
+            static constexpr const char* sites[] = {"?", "image landing", "image at once",
+                                                    "image download", "image download sync",
+                                                    "image download async", "scalar copy HLE"};
+            const std::uint32_t site = e.source >= SiteSource ? e.source - SiteSource : 0;
+            std::printf(" [%s %#llx +%llu tid %u %.1f ms ago first %#llx]",
+                        e.source == DownloadSource ? "download"
+                        : e.source >= SiteSource   ? sites[site < 7 ? site : 0]
+                                                   : "backing",
+                        (unsigned long long)e.address, (unsigned long long)e.size, e.tid,
+                        double(__rdtsc() - e.tsc) / 3.0e6, (unsigned long long)e.first);
+        }
+        if (shown == 0) {
+            std::printf(" none");
+        }
+    }
+    std::printf("\n");
+}
+
 void Record(std::uint64_t address, const void* data, std::uint64_t size, Source source) {
     static thread_local const std::uint32_t tid = static_cast<std::uint32_t>(gettid());
     Entry e{address, size, 0, __rdtsc(), source, tid};
@@ -171,6 +367,16 @@ void DumpFaultWrites(const std::uint64_t* regs, const char* const* names, int co
             std::fprintf(stderr, " %016llx", (unsigned long long)v);
         }
         std::fprintf(stderr, "\n");
+        // uc1 crash (projectile +0x118 handle): also +0x100..+0x13f, to see the fields before it.
+        if (at + 0x140 <= end) {
+            std::fprintf(stderr, "Fault writes: %s+0x100:", names[r]);
+            for (int q = 0; q < 8; ++q) {
+                std::uint64_t v;
+                std::memcpy(&v, backing + 0x100 + q * 8, 8);
+                std::fprintf(stderr, " %016llx", (unsigned long long)v);
+            }
+            std::fprintf(stderr, "\n");
+        }
         const std::uint64_t page = at & ~0xfffull;
         int shown = 0;
         for (std::uint64_t i = n; i-- > (n > FaultSize ? n - FaultSize : 0) && shown < 16;) {
@@ -181,7 +387,9 @@ void DumpFaultWrites(const std::uint64_t* regs, const char* const* names, int co
             const bool hits = e.address < at + 0x40 && e.address + e.size > at;
             std::fprintf(stderr,
                          "Fault writes:   %s %#llx +%llu first %#llx tid %u, %.3f s before the fault%s\n",
-                         e.source == DownloadSource ? "readback" : "backing write",
+                         e.source == DownloadSource ? "readback"
+                         : e.source >= SiteSource   ? "image readback/HLE"
+                                                    : "backing write",
                          (unsigned long long)e.address, (unsigned long long)e.size,
                          (unsigned long long)e.first, e.tid, double(now - e.tsc) / 3.0e9,
                          hits ? " (COVERS IT)" : "");

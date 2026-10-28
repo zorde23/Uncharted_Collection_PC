@@ -2,6 +2,7 @@
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
 
 #include <algorithm>
+#include <bit>
 #include <cstdlib>
 #include <ctime>
 #include <filesystem>
@@ -104,8 +105,25 @@ std::string Describe(const Target& t) {
     return text;
 }
 
+// uc1: GOW3_CAPTURE_LINES raises the per-draw cut (crate pieces: the paint mask constants sit
+// past dword 64); GOW3_CAPTURE_HEX prints the words as hex (descriptors, pointers).
+int CaptureLines() {
+    static const int value = [] {
+        const char* env = std::getenv("GOW3_CAPTURE_LINES");
+        return env && env[0] ? std::max(1, std::atoi(env)) : 9;
+    }();
+    return value;
+}
+bool CaptureHex() {
+    static const bool value = [] {
+        const char* env = std::getenv("GOW3_CAPTURE_HEX");
+        return env && env[0] == '1';
+    }();
+    return value;
+}
+
 // One draw/dispatch for GOW3_CAPTURE_PER_DRAW, from what was bound for it; constants are cut
-// to their first 64 dwords.
+// to their first 64 dwords (GOW3_CAPTURE_LINES - 1 rows of 8).
 void AddDrawLine(Entry& entry, std::string head) {
     for (const auto& [t, storage] : pending_sampled) {
         head += std::format("\n    {} {}", storage ? "writes " : "samples", Describe(t));
@@ -115,7 +133,7 @@ void AddDrawLine(Entry& entry, std::string head) {
     }
     for (const auto& b : pending_buffers) {
         size_t end = 0;
-        for (int line = 0; line < 9 && end != std::string::npos; ++line) {
+        for (int line = 0; line < CaptureLines() && end != std::string::npos; ++line) {
             end = b.find('\n', end + 1);
         }
         head += "\n  " + b.substr(0, end);
@@ -433,7 +451,12 @@ void FrameCapture::Dispatch(u64 cs_hash, u32 x, u32 y, u32 z) {
 }
 
 void FrameCapture::Buffer(u64 stage_hash, u32 slot, VAddr address, const void* data, u64 size) {
-    const u64 bytes = std::min<u64>(size, 1024) & ~u64(3);
+    // uc1: GOW3_CAPTURE_BYTES (up to 4096) prints more of each buffer (vs instance data).
+    static const u64 limit = [] {
+        const char* env = std::getenv("GOW3_CAPTURE_BYTES");
+        return env && env[0] ? std::clamp<u64>(std::strtoull(env, nullptr, 10), 4, 4096) : 1024;
+    }();
+    const u64 bytes = std::min<u64>(size, limit) & ~u64(3);
     std::string out = std::format("  buffer stage {:016x} slot {} at {:#x} size {}:", stage_hash,
                                   slot, address, size);
     if (!data) {
@@ -446,9 +469,17 @@ void FrameCapture::Buffer(u64 stage_hash, u32 slot, VAddr address, const void* d
         if (i % 8 == 0) {
             out += std::format("\n    [{:3}]", i);
         }
-        out += std::format(" {:12.6g}", words[i]);
+        if (CaptureHex()) {
+            out += std::format(" {:08x}", std::bit_cast<u32>(words[i]));
+        } else {
+            out += std::format(" {:12.6g}", words[i]);
+        }
     }
     pending_buffers.push_back(std::move(out));
+}
+
+void FrameCapture::BufferText(std::string text) {
+    pending_buffers.push_back(std::move(text));
 }
 
 void FrameCapture::Sampled(const VideoCore::ImageInfo& info, bool storage,

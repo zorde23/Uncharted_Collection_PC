@@ -1,4 +1,4 @@
-Uncharted: The Nathan Drake Collection para PC (ucndc_pc) v0.3.6
+Uncharted: The Nathan Drake Collection para PC (ucndc_pc) v0.3.7
 ================================================================
 [English below]
 
@@ -38,7 +38,8 @@ Durante o jogo
   FPS e contador de FPS. Em "Avançado" dá para desligar otimizações; "Restaurar padrão" volta
   à configuração testada.
 - "Atalho na área de trabalho" cria um atalho que abre direto o último jogo escolhido.
-- O launcher avisa quando sai uma versão nova (dá para desligar em Opções).
+- O launcher avisa quando sai uma versão nova (dá para desligar em Opções). A partir da 0.3.7,
+  o botão "Atualizar agora" baixa e instala sozinho; saves e configurações ficam como estão.
 
 Dados
 - Saves, cache de shaders e o log ficam em user\ (guarde essa pasta ao atualizar).
@@ -78,7 +79,8 @@ Uncharted 2 and Uncharted 1 are playable, still with some crashes.
 
 The launcher's Options button sets display mode, VSync, FPS limit and the FPS counter; Advanced
 lets you turn optimizations off ("Restore defaults" brings back the tested setup).
-The launcher tells you when a new version is out (can be turned off in Options).
+The launcher tells you when a new version is out (can be turned off in Options); from 0.3.7 on,
+"Update now" downloads and installs it by itself, keeping saves and settings.
 Keyboard and mouse: the launcher's Controls button (or the Controls tab in the in-game menu);
 turn on mouse look to turn the camera with the mouse in all three games (hold Left Alt to free
 the cursor), and change keys and sensitivity there. "Icons in the game" (Controls): PlayStation

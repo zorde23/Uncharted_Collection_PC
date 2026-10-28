@@ -9,6 +9,7 @@
 #include <cstring>
 #include <vector>
 #include "core/memory.h"
+#include "gow3_write_log.h"
 #include "shader_recompiler/info.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
@@ -307,6 +308,33 @@ static bool CopyGuestThroughBacking(Rasterizer& rasterizer, VAddr dst, VAddr src
         !backing || end - src < size) {
         return false;
     }
+    // uc3 (GOW3_HLE_DST_READBACK=1, UC1 bright crate pieces): the destination may hold a small
+    // image the GPU wrote earlier in this submission, queued to go back to RAM at its end (or
+    // already on its way). That readback would land after this copy and bring the older bytes
+    // back over it: GOW3_CLOBBER_LOG saw a 512-byte image at 0x103a910000 overwritten this way
+    // every few seconds, right after a copy here. Bring it back first, as the GPU order has
+    // it: the image write, then this copy.
+    static const bool dst_readback = [] {
+        const char* env = std::getenv("GOW3_HLE_DST_READBACK");
+        return env && env[0] == '1';
+    }();
+    if (dst_readback) {
+        auto& texture_cache = rasterizer.GetTextureCache();
+        u32 landed = texture_cache.DownloadQueuedImagesNow(dst, size);
+        if (texture_cache.HasPendingReadbackBytes(dst, size)) {
+            texture_cache.ResolveReadbacks(dst, size, true, VideoCore::ReadbackSource::CpuWrite);
+            ++landed;
+        }
+        if (landed) {
+            static std::atomic<u32> dst_readbacks{0};
+            const u32 n = dst_readbacks.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (n <= 3 || (n & 1023) == 0) {
+                std::printf("uc3: scalar copy HLE brought an image back to RAM first at 0x%llx "
+                            "(%u times)\n",
+                            static_cast<unsigned long long>(dst), n);
+            }
+        }
+    }
     // uc3 (GOW3_HLE_INVALIDATE=1): the backing write bypasses page protection, so the caches
     // never learn of it and later draws may use their stale GPU copy (swapped textures). Do
     // what a CPU write fault does, before the write (after it, the invalidation would download
@@ -332,6 +360,7 @@ static bool CopyGuestThroughBacking(Rasterizer& rasterizer, VAddr dst, VAddr src
         }
     }
     rasterizer.NoteGuestWrite(dst, size);
+    Gow3WriteLog::NoteWriteSite(dst, size, 6);
     const bool written =
         Core::Memory::Instance()->TryWriteBacking(reinterpret_cast<void*>(dst), backing, size);
     SrtNoteWrite(dst, size, SrtOriginRewrite); // uc3 R.21: again once written

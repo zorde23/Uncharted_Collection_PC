@@ -125,6 +125,11 @@ public:
 
     /// Schedules a copy of pending images for download back to CPU memory.
     void ProcessDownloadImages();
+    /// uc3 (GOW3_HLE_DST_READBACK): guest bytes about to be written past the GPU (scalar copy
+    /// HLE) may hold an image the GPU wrote that is queued to go back to RAM at the end of the
+    /// submission, over the new bytes. Brings such images back now (waits for the GPU) and
+    /// takes them off the queue. Returns how many.
+    u32 DownloadQueuedImagesNow(VAddr address, u64 size);
     /// uc3: an image readback still pending over these bytes (see Rasterizer::IsGpuWritten).
     bool HasPendingReadbackBytes(VAddr address, u64 size) {
         if (!has_pending_readbacks.load(std::memory_order_acquire)) {

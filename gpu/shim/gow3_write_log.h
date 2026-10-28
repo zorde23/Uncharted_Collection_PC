@@ -22,6 +22,20 @@ void NoteIntent(std::uint64_t address, const void* data, std::uint64_t size, Sou
 /// that the fault handler prints for the pages the registers point at.
 void NoteDownload(std::uint64_t address, const void* data, std::uint64_t size);
 bool FaultWrites();
+/// uc3 GOW3_CLOBBER_LOG=1 (UC1 bright crate pieces, diagnosis): a delayed readback copies the
+/// GPU's bytes over guest memory when it lands. Snap keeps the guest bytes when the copy is
+/// recorded (key: the staging bytes the landing will copy from); Check, just before the
+/// landing, reports bytes something else changed in between that the landing overwrites with
+/// different values. Drop forgets a snapshot whose copy will not land.
+bool ClobberLog();
+void ClobberSnap(const void* key, std::uint64_t address, std::uint64_t size);
+void ClobberCheck(const void* key, std::uint64_t address, const void* data, std::uint64_t size,
+                  const char* site);
+void ClobberDrop(const void* key);
+/// GOW3_CLOBBER_LOG with GOW3_FAULT_WRITES: which code wrote guest memory past the GPU just now
+/// (site: 1 image readback landing, 2 image readback at once, 3 image download (no deferral),
+/// 4 image download sync, 5 image download async, 6 scalar copy HLE).
+void NoteWriteSite(std::uint64_t address, std::uint64_t size, std::uint32_t site);
 }
 
 extern "C" void gow3gpu_dump_guest_writes(void* ucontext);

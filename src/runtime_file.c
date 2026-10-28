@@ -47,13 +47,61 @@ typedef struct {
 _Static_assert(sizeof(GuestStat)==120,"FreeBSD stat layout");
 
 typedef struct { char *names; size_t count, *offsets; unsigned char *types; } Listing;
-typedef struct { int used, host; Listing *dir; size_t position; char path[512]; } File;
+/* A launcher patch laid over a game file as it is read (key icons UC1 streams from a 1.4 GB pak). */
+typedef struct { uint64_t offset; uint32_t length; const unsigned char *bytes; } PatchBlock;
+typedef struct { char rel[256]; size_t count; PatchBlock *blocks; } FilePatch;
+typedef struct { int used, host; Listing *dir; size_t position; char path[512]; const FilePatch *patch; } File;
 typedef struct { char guest[64]; char host[512]; } Mount;
 static File files[MAX_FILES];
 static Mount mounts[MAX_MOUNTS];
 static size_t mount_count, opens, reads, writes, missing;
 static uint64_t bytes_read;
 static pthread_mutex_t lock=PTHREAD_MUTEX_INITIALIZER;
+static FilePatch patches[4];
+static size_t patch_count;
+
+/* "UCPATCH1", block count (u32), 0 (u32), then per block offset (u64), length (u32), 0 (u32), bytes. */
+static size_t load_patch(const char *host,const char *rel) {
+    if (patch_count==sizeof(patches)/sizeof(patches[0])) return 0;
+    FILE *f=fopen(host,"rb");
+    if (!f) return 0;
+    fseek(f,0,SEEK_END); long size=ftell(f); fseek(f,0,SEEK_SET);
+    unsigned char *data=size>=16 ? malloc((size_t)size) : NULL;
+    size_t got=data ? fread(data,1,(size_t)size,f) : 0;
+    fclose(f);
+    if (!data || got!=(size_t)size || memcmp(data,"UCPATCH1",8)) { free(data); return 0; }
+    uint32_t count; memcpy(&count,data+8,4);
+    PatchBlock *blocks=calloc(count ? count : 1,sizeof(*blocks));
+    size_t at=16, n=0;
+    while (blocks && n<count && at+16<=(size_t)size) {
+        uint64_t offset; uint32_t length;
+        memcpy(&offset,data+at,8); memcpy(&length,data+at+8,4);
+        if (at+16+length>(size_t)size) break;
+        blocks[n++]=(PatchBlock){offset,length,data+at+16};
+        at+=16+length;
+    }
+    FilePatch *p=&patches[patch_count++];
+    snprintf(p->rel,sizeof(p->rel),"%s",rel);
+    p->count=n; p->blocks=blocks;
+    return n;
+}
+static const FilePatch *find_patch(const char *guest) {
+    if (!patch_count || !guest) return NULL;
+    if (!strncmp(guest,"/app0/",6)) guest+=6;
+    else if (!strncmp(guest,"/hostapp/",9)) guest+=9;
+    else if (*guest=='/') return NULL;
+    for (size_t i=0;i<patch_count;++i) if (!strcmp(patches[i].rel,guest)) return &patches[i];
+    return NULL;
+}
+static void apply_patch(const FilePatch *p,void *buffer,int64_t offset,int64_t n) {
+    if (!p || offset<0 || n<=0) return;
+    uint64_t start=(uint64_t)offset, end=start+(uint64_t)n;
+    for (size_t i=0;i<p->count;++i) {
+        const PatchBlock *b=&p->blocks[i];
+        uint64_t from=b->offset>start ? b->offset : start, to=b->offset+b->length<end ? b->offset+b->length : end;
+        if (from<to) memcpy((unsigned char *)buffer+(from-start),b->bytes+(from-b->offset),(size_t)(to-from));
+    }
+}
 
 int runtime_file_mount(const char *guest,const char *host) {
     pthread_mutex_lock(&lock);
@@ -103,6 +151,13 @@ void runtime_file_configure(const char *app0,const char *user) {
             memcpy(rel,p,n); rel[n]=0;
             for (char *c=rel;*c;++c) if (*c=='\\') *c='/';
             snprintf(host,sizeof(host),"%s/%s",icon_root,rel);
+            size_t len=strlen(rel);
+            if (len>6 && !strcmp(rel+len-6,".patch")) { /* laid over the game's file, not in place of it */
+                rel[len-6]=0;
+                printf("Key icons: /app0/%s patched from %s (%zu pictures)\n",rel,host,load_patch(host,rel));
+                p=end ? end+1 : NULL;
+                continue;
+            }
             snprintf(guest,sizeof(guest),"/app0/%s",rel);
             runtime_file_mount(guest,host);
             snprintf(guest,sizeof(guest),"/hostapp/%s",rel);
@@ -271,7 +326,7 @@ static int64_t do_open(const char *guest,int flags,int mode) {
     int fd=-1;
     for (int i=3;i<MAX_FILES;++i) if (!files[i].used) { fd=i; break; }
     if (fd<0) { pthread_mutex_unlock(&lock); if (host>=0) close(host); free_listing(dir); return -EMFILE; }
-    files[fd]=(File){.used=1,.host=host,.dir=dir};
+    files[fd]=(File){.used=1,.host=host,.dir=dir,.patch=find_patch(guest)};
     snprintf(files[fd].path,sizeof(files[fd].path),"%s",guest);
     ++opens;
     pthread_mutex_unlock(&lock);
@@ -340,8 +395,11 @@ static int64_t do_read(int fd,void *buffer,uint64_t size) {
     int h=host_fd(fd);
     if (h<0) return -EBADF;
     touch_for_write(buffer,size);
+    const FilePatch *patch=fd>=3 && fd<MAX_FILES ? files[fd].patch : NULL;
+    int64_t at=patch ? host_lseek(h,0,SEEK_CUR) : -1;
     ssize_t n=host_read(h,buffer,size);
     if (n<0) { int e=errno; read_failed("read",fd,buffer,size,-1,e); return -e; }
+    apply_patch(patch,buffer,at,n);
     __atomic_add_fetch(&reads,1,__ATOMIC_RELAXED); __atomic_add_fetch(&bytes_read,(uint64_t)n,__ATOMIC_RELAXED);
     return n;
 }
@@ -351,6 +409,7 @@ static int64_t do_pread(int fd,void *buffer,uint64_t size,int64_t offset) {
     touch_for_write(buffer,size);
     ssize_t n=pread(h,buffer,size,offset);
     if (n<0) { int e=errno; read_failed("pread",fd,buffer,size,offset,e); return -e; }
+    if (fd>=3 && fd<MAX_FILES) apply_patch(files[fd].patch,buffer,offset,n);
     __atomic_add_fetch(&reads,1,__ATOMIC_RELAXED); __atomic_add_fetch(&bytes_read,(uint64_t)n,__ATOMIC_RELAXED);
     return n;
 }

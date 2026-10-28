@@ -25,6 +25,8 @@ No install and no terminal needed:
    automatically when it sits next to it.
 4. Click **Play** on the game you want. The launcher can also create desktop shortcuts.
 
+To update: from 0.3.7 on, the launcher's **Update now** button downloads and installs the new version by itself. From an older version, extract the new zip over the old folder; saves and settings are not in the zip and stay as they are.
+
 The **Options** button sets the display mode (window, borderless, fullscreen), VSync, the FPS
 limit and the FPS counter. Under *Advanced* you can turn off any of the optimizations; with all of
 them on you get the tested setup. In game, **Insert** or **F1** (or L2+R2+L3+R3 on a controller) opens the port's
@@ -72,13 +74,23 @@ Uncharted 1 came later almost for free, and the goal is now the whole trilogy.
 
 ## Status
 
-Updated 2026-10-23.
+Updated 2026-10-27.
 
 | Game | Executable | Status |
 |---|---|---|
 | Uncharted 1 | `eboot.bin` | **Playable**, at **60 FPS** with sound (gunshots included); still has some crashes |
 | Uncharted 2 | `big2-ps4_Shipping.elf` | **Playable**, 51–60 FPS, with its own saves; still has some crashes |
 | Uncharted 3 | `big3-ps4_Shipping.elf` | **100% playable from start to end**, at **60 FPS in 1080p, with no upscaling or frame generation**. Some parts still need optimization and drop below 60 (around 50 in heavy vegetation, the Chateau), always staying above 30 FPS. One crash in the whole playthrough, not reproduced or fixed yet. Known issues listed below |
+
+New in 0.3.7:
+- **Update from the launcher**: when a new version is out, the "Update now" button downloads and installs it, keeping saves and settings (works from this version on).
+- Videos that froze on one picture while the sound kept playing (8 GB cards at 1440p) are fixed.
+- Texture memory now follows what the card has free, with fewer texture swaps on 8 GB cards.
+- UC2: fix for the screen blurring while aiming (from SuperMedo); still being tested.
+- UC3: fix for Sully's stretched shirt on NVIDIA cards (from BilalReloaded's port, via SuperMedo); still being tested.
+- UC1: with Keyboard icons, the rotate clockwise prompt (at the generator, before chapter 19) shows your keys instead of the stick.
+- Options > Advanced, Experimental: 5.1/7.1 sound when Windows is set up for surround speakers or headphones.
+- Launcher: the Options window scrolls and the Save button is always visible; ✕ button to clear the game and update folders; accepts the CUSA02826 dump.
 
 New in 0.3.6:
 - **FPS is back**: 0.3.4 and 0.3.5 lost about 20% FPS in heavy scenes (for example the Citadel in UC3). Fixed.
@@ -125,6 +137,7 @@ Known issues:
 - Lightly tested. Please report missing sounds or visual bugs.
 
 **Uncharted 1**
+- In the bunker, some pieces of broken crates can turn too bright a while later. Being investigated.
 - Lightly tested. Please report missing sounds or visual bugs.
 
 The project log (in Portuguese), with what was done and why, is in
@@ -235,7 +248,9 @@ The full list, with measurements, is in the [DEVLOG](docs/uc3/DEVLOG.md).
   PC port (the base of everything, also called bbport).
 - **Supermedo** (Mohammed Albarghouthi): the [Bloodborne Windows port](https://github.com/Supermedo/bloodborne_pc)
   and [uncharted_pc](https://github.com/Supermedo/uncharted_pc), the source of ideas and fixes used
-  here (scalar constant copy HLE, addr64 `BUFFER_LOAD`, Ajm end-of-job rules, the `m_gfxEopTick` wait patch from 0.3.2, read-only `O_CREAT` open for Uncharted 1 sound, the Intel GPU fix from 0.3.3).
+  here (scalar constant copy HLE, addr64 `BUFFER_LOAD`, Ajm end-of-job rules, the `m_gfxEopTick` wait patch from 0.3.2, read-only `O_CREAT` open for Uncharted 1 sound, the Intel GPU fix from 0.3.3, the UC2 aim focus 1x1 readback by Umar-Qayyum-dev).
+- **BilalReloaded**: the fix for Sully's clothes on NVIDIA cards (barriers in the cloth shader), from
+  [his port](https://github.com/bc160201983/Uncharted-The-Nathan-Drake-Collection-PC-port), which reached this project through Supermedo's uncharted_pc.
 - **d4rksp4rt4n**: found the cause of the crashes on Intel 12th gen and newer CPUs (Windows overwrites the
   red zone of the game's functions) and wrote the fix, [uncharted_pc PR #403](https://github.com/Supermedo/uncharted_pc/pull/403), from the
   Bloodborne port and the same idea as [shadPS4's protection](https://github.com/shadps4-emu/shadPS4/pull/4802). Shared here in [issue #4](https://github.com/zorde23/Uncharted_Collection_PC/issues/4).

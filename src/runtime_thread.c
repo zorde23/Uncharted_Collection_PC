@@ -148,11 +148,13 @@ GuestThread *runtime_thread_current(void) {
 void runtime_thread_attach_host(const char *name) {
     GuestThread *t=runtime_thread_current();
     snprintf(t->name,sizeof(t->name),"%s",name ? name : "host");
+    runtime_set_guest_fpu();
 }
 static void stack_guarantee(void);
 void runtime_thread_attach_main(void) {
     GuestThread *t=runtime_thread_current();
     snprintf(t->name,sizeof(t->name),"main");
+    runtime_set_guest_fpu();
     stack_guarantee();
 }
 static GuestThread *find_thread(void *handle) {
@@ -293,10 +295,35 @@ static void stack_guarantee(void) { ULONG bytes=64*1024; SetThreadStackGuarantee
 #else
 static void stack_guarantee(void) {}
 #endif
+/* GOW3_GUEST_MXCSR=<hex> (off by default): guest threads, host threads that call guest code, the
+ * main thread and new fibers start with that MXCSR and the x87 control word 0x037f. The PS4 runs
+ * game code with 0x9fc0 (flush to zero, denormals are zero); the host default is 0x1f80. Ported
+ * from SuperMedo's uncharted_pc 0cf1277 (GPL; on by default there for U2's floating NPCs) for
+ * UC1's crate contents and NPCs sinking through the bunker floor. */
+unsigned runtime_guest_mxcsr(void) {
+    static unsigned value;
+    static int once;
+    if (!__atomic_load_n(&once,__ATOMIC_ACQUIRE)) {
+        const char *env=getenv("GOW3_GUEST_MXCSR");
+        value=env ? (unsigned)strtoul(env,NULL,16)&0xffffu : 0;
+        if (value) printf("Runtime: game code runs with MXCSR %#x (GOW3_GUEST_MXCSR)\n",value);
+        __atomic_store_n(&once,1,__ATOMIC_RELEASE);
+    }
+    return value;
+}
+void runtime_set_guest_fpu(void) {
+    const unsigned value=runtime_guest_mxcsr();
+    if (!value) return;
+    uint32_t mxcsr=value;
+    uint16_t fpucw=0x037f;
+    __asm__ volatile("ldmxcsr %0" : : "m"(mxcsr));
+    __asm__ volatile("fldcw %0" : : "m"(fpucw));
+}
 static void *host_start(void *p) {
     GuestThread *t=p;
     attach(t);
     set_host_name(t->name);
+    runtime_set_guest_fpu();
     stack_guarantee();
     if (!exit_setjmp(t)) t->result=t->entry(t->argument);
     runtime_thread_keys_cleanup();

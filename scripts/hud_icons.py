@@ -441,3 +441,58 @@ def make_hud_pak(src, dst, keys, font, preview=None, english=False, style='keys'
         done.append(t['short'])
     open(dst, 'wb').write(bytes(buf))
     return done
+
+
+# ---- streamed textures (UC1) -------------------------------------------------------------------
+# UC1 streams the full-size pictures of some prompts (turning the stick clockwise, at the generator
+# before chapter 19) from texturedict1/ps4/chunk-1-tstrm.pak (1.4 GB); particle.pak only has their
+# 32x64 stand-ins. Same layout as the paks above, so the same drawings are written, but only the
+# changed blocks go to a small patch file that the port lays over the game's file as it is read:
+# b'UCPATCH1', count (u32), 0 (u32), then per block offset (u64), length (u32), 0 (u32) and the bytes.
+def stream_textures(data):
+    """The textures of a big pak without reading all of it: the names are in its header."""
+    pages = struct.unpack_from('<I', data, 8)[0]
+    off, size, _ = struct.unpack_from('<III', data, 0x2c + 12 * pages)
+    base = off + size
+    head = data[:base]
+    out = []
+    for m in re.finditer(rb'd:/dev/[^\x00]*/hud/buttons/[^\x00]*\x00', head):
+        p = m.start()
+        off, size, _, _, fmt, _, mips, w, h = struct.unpack_from('<QIIIIIIII', head, p - 0x38)
+        name = m.group()[:-1].split(b'texture2/')[-1].decode()
+        short = name.rsplit('/', 2)[-2].rsplit('.', 1)[0]
+        out.append(dict(name=name, short=short, fmt=fmt, w=w, h=h, mips=mips, pos=base + off, size=size))
+    return out
+
+
+def make_hud_patch(src, dst, keys, font, preview=None, english=False, style='keys'):
+    import mmap
+    global SHORT, STYLE, MATERIAL
+    SHORT = K.SHORT_EN if english else K.SHORT
+    STYLE = style
+    MATERIAL = None
+    done, blocks = [], []
+    with open(src, 'rb') as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as data:
+        texs = [t for t in stream_textures(data) if t['fmt'] in (BC1, BC1_SRGB, BC4)]
+        by_short = {t['short'].lower(): t for t in texs}
+
+        def original(short):
+            t = by_short.get(short.lower())
+            return read_image(data, t) if t else None
+
+        for t in texs:
+            pic = picture(t['short'], t['w'], t['h'], keys, font, original)
+            if pic is None:
+                continue
+            rgb, a = pic
+            old = data[t['pos']:t['pos'] + t['size']]
+            buf = bytearray(old)
+            write_image(buf, dict(t, pos=0), a if 'trans' in t['short'].lower() else rgb)
+            if bytes(buf) != old:
+                blocks.append((t['pos'], bytes(buf)))
+                done.append(t['short'])
+    with open(dst, 'wb') as out:
+        out.write(b'UCPATCH1' + struct.pack('<II', len(blocks), 0))
+        for pos, b in sorted(blocks):
+            out.write(struct.pack('<QII', pos, len(b), 0) + b)
+    return done

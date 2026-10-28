@@ -141,6 +141,7 @@ static ABI int32_t fiber_initialize(Fiber *f, const char *name, uint64_t entry, 
     f->regs.rsp=((uint64_t)(uintptr_t)(f->stack_low+size))&~UINT64_C(15);
     f->regs.rip=(uint64_t)(uintptr_t)uc3_fiber_start;
     f->regs.mxcsr=0x1F80; f->regs.fcw=0x037F; /* FreeBSD defaults: all exceptions masked */
+    if (runtime_guest_mxcsr()) f->regs.mxcsr=runtime_guest_mxcsr(); /* GOW3_GUEST_MXCSR: the PS4's 0x9fc0 */
     if (!__atomic_fetch_add(&created,1,__ATOMIC_RELAXED))
         printf("Runtime: first fiber \"%s\" (%llu KiB stack)\n",f->name,(unsigned long long)(size/1024));
     return 0;

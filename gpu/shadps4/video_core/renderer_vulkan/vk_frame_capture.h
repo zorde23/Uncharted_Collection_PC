@@ -49,8 +49,10 @@ public:
     static void SamplerState(std::string text);
     /// Contents of a bound buffer (first 1 KiB), kept for small passes and a pass's first draw.
     /// uc3: callers copy at most this much of a guest buffer (Buffer prints 1 KiB).
-    using CapturedBytes = std::array<u8, 1024>;
+    using CapturedBytes = std::array<u8, 4096>;
     static void Buffer(u64 stage_hash, u32 slot, VAddr address, const void* data, u64 size);
+    /// uc1 (white crates): a free text line printed with the draw's buffers.
+    static void BufferText(std::string text);
     static void Note(const char* text);
 
     /// uc3 (GOW3_DUMP_CAPTURE): the number of the captured frame the GPU stream is in (its

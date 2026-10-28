@@ -3629,6 +3629,62 @@ bool Rasterizer::IsComputeImageClear(const Pipeline* pipeline) {
     return true;
 }
 
+// uc1 (white CAUTION crates, GOW3_CAPTURE_LEAVES=<ps hex>[:<dword>], diagnosis): for a captured
+// flat of that shader, each GPU-written leaf dword (where it comes from, its ring value, guest value,
+// who holds it) and 64 dwords of guest memory at the pointer in flat[<dword>..+1] (default 16).
+void Rasterizer::CaptureFlatSources(const Shader::Info& stage, const RingBinding& ring,
+                                    const u8* captured, u64 n) {
+    static const char* env = std::getenv("GOW3_CAPTURE_LEAVES");
+    if (!env || !env[0]) {
+        return;
+    }
+    static const u32 want = u32(std::strtoull(env, nullptr, 16));
+    static const u32 ptr_dword = [] {
+        const char* colon = std::strchr(env, ':');
+        return colon ? u32(std::strtoul(colon + 1, nullptr, 10)) : 16u;
+    }();
+    if (u32(stage.pgm_hash) != want) {
+        return;
+    }
+    std::string out = "    leaves:";
+    for (u32 i = 0; i < num_ring_stages; ++i) {
+        for (u32 j = 0; j < ring_stages[i].num_leaves; ++j) {
+            const auto& leaf = ring_stages[i].leaves[j];
+            if (leaf.ring_offset < ring.offset || leaf.ring_offset + 4 > ring.offset + n) {
+                continue;
+            }
+            const u64 at = leaf.ring_offset - ring.offset;
+            u32 ring_value = 0;
+            std::memcpy(&ring_value, constant_ring->Data(leaf.ring_offset), 4);
+            u32 guest_value = 0;
+            std::memcpy(&guest_value, captured + at, 4);
+            const bool gpu = IsGpuWritten(leaf.src, 4);
+            out += std::format("\n      [{:3}] src {:#x} ring {:08x} guest {:08x}{}{}", at / 4,
+                               leaf.src, ring_value, guest_value, gpu ? " gpu-written " : "",
+                               gpu ? DescribeGpuWritten(leaf.src, 4) : "");
+        }
+    }
+    if (u64(ptr_dword) * 4 + 8 <= n) {
+        u64 ptr = 0;
+        std::memcpy(&ptr, captured + ptr_dword * 4, 8);
+        out += std::format("\n    flat[{}] pointer {:#x}", ptr_dword, ptr);
+        if (ptr && memory->IsValidGpuMapping(ptr, 0)) {
+            std::array<u32, 64> words{};
+            memory->CopySparseMemory(ptr, reinterpret_cast<u8*>(words.data()), sizeof(words));
+            const bool gpu = IsGpuWritten(ptr, sizeof(words));
+            out += std::format(", guest now{}{}:", gpu ? ", gpu-written " : ", not gpu-written",
+                               gpu ? DescribeGpuWritten(ptr, sizeof(words)) : "");
+            for (u32 k = 0; k < words.size(); ++k) {
+                if (k % 8 == 0) {
+                    out += std::format("\n      [{:3}]", k);
+                }
+                out += std::format(" {:08x}", words[k]);
+            }
+        }
+    }
+    FrameCapture::BufferText(std::move(out));
+}
+
 void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* prepared,
                              Shader::Backend::Bindings& binding,
                              Shader::PushData& push_data, u32& write_index) {
@@ -3658,6 +3714,7 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                     }
                 }
                 FrameCapture::Buffer(stage.pgm_hash, buffer_index, 0, bytes.data(), ring->size);
+                CaptureFlatSources(stage, *ring, bytes.data(), n);
             } else if (FrameCapture::Active() && memory->IsValidGpuMapping(ring->address, 0)) {
                 // uc3: through the backing view, never the guest pointer: in precise mode a
                 // GPU-written page is read-protected and the fault would be handled inline on

@@ -118,6 +118,9 @@ void runtime_savedata_report(void);
 int runtime_savedata_param(int32_t user, const char *dir, void *param);
 int runtime_savedata_icon(int32_t user, const char *dir, char *out, size_t size);
 void runtime_thread_attach_host(const char *name);
+/* GOW3_GUEST_MXCSR (runtime_thread.c): the MXCSR for game code, 0 when off; and loading it. */
+unsigned runtime_guest_mxcsr(void);
+void runtime_set_guest_fpu(void);
 /* Host functions the loader runs at the start of guest functions found by their code (probe.c,
  * mouse camera; ported from SuperMedo's uncharted_pc, GPL). `pattern` is hex bytes with ?? for
  * any byte; it must match exactly once in the executable code (and `require` at match+require_at,

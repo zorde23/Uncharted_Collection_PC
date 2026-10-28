@@ -6,9 +6,10 @@
 #include <pthread.h>
 #include <sched.h>
 
-/* runtime.c pieces runtime_fiber.c uses. */
+/* runtime.c and runtime_thread.c pieces runtime_fiber.c uses. */
 void runtime_report(void) {}
 uintptr_t runtime_lookup(const RuntimeExport *table, size_t count, const char *nid) { (void)table; (void)count; (void)nid; return 0; }
+unsigned runtime_guest_mxcsr(void) { return 0; }
 
 static int failures;
 #define CHECK(cond) do { if (!(cond)) { fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); ++failures; } } while (0)

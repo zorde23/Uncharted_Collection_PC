@@ -23,6 +23,7 @@
 #include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
+#include "gow3_write_log.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h" // uc3 R.10.17: SrtNoteReadback
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -226,6 +227,9 @@ void TextureCache::RetireReadbacks() {
         [this](auto& entry) {
             if (entry.valid) {
                 entry.payload.Invalidate();
+                Gow3WriteLog::ClobberCheck(entry.payload.mapped, entry.address,
+                                           entry.payload.mapped, entry.size, "image deferred");
+                Gow3WriteLog::NoteWriteSite(entry.address, entry.size, 1);
                 Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(entry.address),
                     entry.payload.mapped, entry.size);
                 Vulkan::SrtNoteReadback(entry.address, entry.size);
@@ -290,6 +294,7 @@ void TextureCache::CancelReadbacks(VAddr address, u64 size) {
     if (!deferred_readbacks) return;
     std::scoped_lock lock{readback_mutex};
     pending_readbacks.Cancel(address, size, [this](auto& entry) {
+        Gow3WriteLog::ClobberDrop(entry.payload.mapped);
         if (entry.watched) WatchReadback<false>(entry.address, entry.size);
         ++readbacks_canceled;
     });
@@ -345,6 +350,7 @@ void TextureCache::ProcessDownloadImages() {
                 if (!pending_readbacks.CanFit(copy->size)) {
                     scheduler.Finish();
                     copy->staging.Invalidate();
+                    Gow3WriteLog::NoteWriteSite(copy->guest_address, copy->size, 2);
                     Core::Memory::Instance()->TryWriteBacking(
                         std::bit_cast<u8*>(copy->guest_address), copy->staging.mapped, copy->size);
                     Vulkan::SrtNoteReadback(copy->guest_address, copy->size);
@@ -364,6 +370,8 @@ void TextureCache::ProcessDownloadImages() {
                                      slot->cpu_accesses, image.info.pixel_format};
                         }
                     }
+                    Gow3WriteLog::ClobberSnap(copy->staging.mapped, copy->guest_address,
+                                              copy->size);
                     pending_readbacks.Push(copy->guest_address, copy->size,
                         scheduler.CurrentTick(), copy->staging);
                     has_pending_readbacks.store(true, std::memory_order_release);
@@ -418,6 +426,7 @@ void TextureCache::ProcessDownloadImages() {
     scheduler.Finish();
     for (const PendingDownload& download : pending) {
         download.staging.Invalidate();
+        Gow3WriteLog::NoteWriteSite(download.guest_address, download.size, 3);
         Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(download.guest_address),
                                                   download.staging.mapped, download.size);
         Vulkan::SrtNoteReadback(download.guest_address, download.size);
@@ -454,6 +463,30 @@ std::optional<TextureCache::PendingDownload> TextureCache::RecordImageDownload(I
     return PendingDownload{image.info.guest_address, download_size, download};
 }
 
+u32 TextureCache::DownloadQueuedImagesNow(VAddr address, u64 size) {
+    boost::container::small_vector<ImageId, 4> hits;
+    {
+        std::unique_lock lk{download_images_mutex};
+        for (auto* set : {&download_images, &tiny_download_images}) {
+            for (auto it = set->begin(); it != set->end();) {
+                const Image& image = slot_images[*it];
+                if (image.Overlaps(address, size)) {
+                    if (std::ranges::find(hits, *it) == hits.end()) {
+                        hits.push_back(*it);
+                    }
+                    it = set->erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
+    }
+    for (const ImageId image_id : hits) {
+        DownloadImageMemory(image_id, true);
+    }
+    return static_cast<u32>(hits.size());
+}
+
 void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
     Image& image = slot_images[image_id];
     ResolveReadbacks(image.info.guest_address, image.info.guest_size, true,
@@ -485,13 +518,18 @@ void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
     if (sync) {
         scheduler.Finish();
         download.Invalidate();
+        Gow3WriteLog::NoteWriteSite(image.info.guest_address, download_size, 4);
         Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(image.info.guest_address),
                                                   download.mapped, download_size);
         Vulkan::SrtNoteReadback(image.info.guest_address, download_size);
     } else {
+        Gow3WriteLog::ClobberSnap(download.mapped, image.info.guest_address, download_size);
         scheduler.DeferPriorityOperation(
             [this, device_addr = image.info.guest_address, download, download_size] {
                 download.Invalidate();
+                Gow3WriteLog::ClobberCheck(download.mapped, device_addr, download.mapped,
+                                           download_size, "image download");
+                Gow3WriteLog::NoteWriteSite(device_addr, download_size, 5);
                 Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(device_addr),
                                                           download.mapped, download_size);
                 Vulkan::SrtNoteReadback(device_addr, download_size);
@@ -2148,9 +2186,13 @@ void TextureCache::RunGarbageCollector() {
         return env ? std::atof(env) : -1.0;
     }();
     static bool reloaded = false;
-    if (reload_at >= 0 && !reloaded &&
+    // uc1 (GOW3_RELOAD_FILE=<path>, bright crates): the same re-upload, each time that file
+    // appears (a .bat creates it while the bad texture is on screen); the file is consumed.
+    static const char* reload_file = std::getenv("GOW3_RELOAD_FILE");
+    const bool reload_now = reload_file && *reload_file && std::remove(reload_file) == 0;
+    if (reload_now || (reload_at >= 0 && !reloaded &&
         std::chrono::duration<double>(std::chrono::steady_clock::now() - uc3_flash_clock).count() >=
-            reload_at) {
+            reload_at)) {
         reloaded = true;
         std::scoped_lock lk{mutex};
         u32 count = 0;
@@ -2163,7 +2205,7 @@ void TextureCache::RunGarbageCollector() {
                 ++count;
             }
         });
-        std::printf("uc3: GOW3_RELOAD_AT: %u images marked for re-upload\n", count);
+        std::printf("uc3: GOW3_RELOAD_AT/FILE: %u images marked for re-upload\n", count);
         std::fflush(stdout);
     }
 

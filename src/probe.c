@@ -2119,7 +2119,8 @@ int main(int argc, char **argv) {
     }
 #endif
     /* ucndc: mouse camera (input.ini with mouse_look=1; GOW3_MOUSE_CAMERA=0 keeps the mouse a stick) */
-    if (gpu_enabled && runtime_pad_mouse_camera()) install_game_callbacks(segments, ns, size);
+    const char *probe_log=getenv("GOW3_U1_PROBE_LOG"); /* UC1 light probe log: its hook alone when the mouse camera is off */
+    if (gpu_enabled && (runtime_pad_mouse_camera() || (probe_log && probe_log[0]=='1'))) install_game_callbacks(segments, ns, size);
     if (gpu_enabled && runtime_pad_mouse_camera()) install_call98_log(segments, ns, size);
 #ifdef _WIN32
     printf("Guest TCB loads redirected to the TEB TLS slot: %" PRIu64 "\n", patch_tcb_loads(segments, ns));

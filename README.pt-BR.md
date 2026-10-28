@@ -25,6 +25,8 @@ Sem instalar nada e sem terminal:
    quando está ao lado dela.
 4. Clique em **Jogar** no jogo que quiser. O launcher também cria atalhos na área de trabalho.
 
+Para atualizar: a partir da 0.3.7, o botão **Atualizar agora** do launcher baixa e instala a versão nova sozinho. Numa versão anterior, extraia o zip novo por cima da pasta antiga; saves e configurações não estão no zip e ficam como estão.
+
 O botão **Opções** ajusta o modo de tela (janela, sem borda, tela cheia), o VSync, o limite de FPS e
 o contador de FPS. Em *Avançado* dá para desligar qualquer otimização; com todas ligadas fica a
 configuração testada. No jogo, **Insert** ou **F1** (ou L2+R2+L3+R3 no controle) abre o menu do port. Os saves ficam
@@ -70,13 +72,23 @@ vieram depois quase de graça, e agora o objetivo é a trilogia inteira.
 
 ## Situação
 
-Atualizado em 23/10/2026.
+Atualizado em 27/10/2026.
 
 | Jogo | Executável | Situação |
 |---|---|---|
 | Uncharted 1 | `eboot.bin` | **Jogável**, a **60 FPS**, com som (inclusive os tiros); ainda com alguns travamentos |
 | Uncharted 2 | `big2-ps4_Shipping.elf` | **Jogável**, 51–60 FPS, com saves próprios; ainda com alguns travamentos |
 | Uncharted 3 | `big3-ps4_Shipping.elf` | **100% jogável do início ao fim**, a **60 FPS em 1080p, sem upscaling nem geração de quadros**. Algumas partes ainda precisam de otimização e caem abaixo de 60 (perto de 50 com muita vegetação, no Castelo), sempre acima de 30 FPS. Um único travamento no jogo inteiro, ainda não reproduzido nem corrigido. Problemas conhecidos listados abaixo |
+
+Novo na 0.3.7:
+- **Atualizar pelo launcher**: quando sai versão nova, o botão "Atualizar agora" baixa e instala sozinho, mantendo saves e configurações (vale a partir desta versão).
+- Vídeos que congelavam numa imagem com o som rodando (placas de 8 GB em 1440p) foram corrigidos.
+- A memória de texturas agora segue o que a placa tem livre, com menos trocas de textura em placas de 8 GB.
+- UC2: correção do borrão na tela ao mirar (do SuperMedo); ainda em teste.
+- UC3: correção da camisa do Sully esticada em placas NVIDIA (do port do BilalReloaded, via SuperMedo); ainda em teste.
+- UC1: com ícones de Teclado, o aviso de girar no sentido horário (no gerador, antes do capítulo 19) mostra as teclas em vez do analógico.
+- Opções > Avançado, Experimental: som 5.1/7.1 quando o Windows está configurado para caixas ou fone surround.
+- Launcher: a janela de Opções rola e o botão Salvar aparece sempre; botão ✕ para limpar as pastas do jogo e da atualização; aceita o dump CUSA02826.
 
 Novo na 0.3.6:
 - **FPS de volta**: a 0.3.4 e a 0.3.5 perdiam cerca de 20% de FPS nas cenas pesadas (por exemplo a Cidadela no UC3). Corrigido.
@@ -124,6 +136,7 @@ Problemas conhecidos:
 - Pouco testado. Avise se faltar algum som ou aparecer algum defeito.
 
 **Uncharted 1**
+- No bunker, alguns pedaços de caixas quebradas podem ficar claros demais um tempo depois. Em investigação.
 - Pouco testado. Avise se faltar algum som ou aparecer algum defeito.
 
 O diário do projeto, com o que foi feito e por quê, está em [docs/uc3/DEVLOG.md](docs/uc3/DEVLOG.md).
@@ -233,7 +246,9 @@ A lista completa, com medições, está no [DEVLOG](docs/uc3/DEVLOG.md).
 - **Supermedo** (Mohammed Albarghouthi): o [port do Bloodborne para Windows](https://github.com/Supermedo/bloodborne_pc)
   e o [uncharted_pc](https://github.com/Supermedo/uncharted_pc), de onde vieram ideias e correções
   (HLE da cópia escalar de constantes, `BUFFER_LOAD` com addr64, regras de fim de job do Ajm, patch de espera do
-  `m_gfxEopTick` da 0.3.2, abertura com `O_CREAT` em pasta somente leitura para o som do UC1, correção para placas Intel da 0.3.3).
+  `m_gfxEopTick` da 0.3.2, abertura com `O_CREAT` em pasta somente leitura para o som do UC1, correção para placas Intel da 0.3.3, foco da mira do UC2 com o readback de 1x1, do Umar-Qayyum-dev).
+- **BilalReloaded**: a correção da roupa do Sully em placas NVIDIA (barreiras no shader de tecido), do
+  [port dele](https://github.com/bc160201983/Uncharted-The-Nathan-Drake-Collection-PC-port), que chegou aqui pelo uncharted_pc do Supermedo.
 - **d4rksp4rt4n**: achou a causa dos travamentos em processadores Intel de 12ª geração ou mais novos (o Windows
   apaga a red zone das funções do jogo) e fez a correção, a [PR #403 do uncharted_pc](https://github.com/Supermedo/uncharted_pc/pull/403), vinda do port do
   Bloodborne e com a mesma ideia da [proteção do shadPS4](https://github.com/shadps4-emu/shadPS4/pull/4802). Passada aqui na [issue #4](https://github.com/zorde23/Uncharted_Collection_PC/issues/4).

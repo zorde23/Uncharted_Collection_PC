@@ -39,7 +39,7 @@ LOG_FILE = USER_DIR / 'last_run.log'
 INPUT_FILE = DATA_DIR / 'input.ini'
 APP_NAME = 'Uncharted Collection PC'
 EXE_NAME = 'Uncharted Launcher.exe'
-VERSION = '0.3.7-beta2'
+VERSION = '0.3.7'
 RELEASES_API = 'https://api.github.com/repos/zorde23/Uncharted_Collection_PC/releases/latest'
 RELEASES_PAGE = 'https://github.com/zorde23/Uncharted_Collection_PC/releases/latest'
 NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
@@ -231,6 +231,9 @@ ICON_FILES = {'uc1': ('u1data/data.psarc', 'u1data/build/main/pak19/ps4/particle
               'uc3': ('u3data/data.psarc', 'u3data/build/main/pak23/ps4/hud.pak')}
 # Keyboard icons only: UC1's texts, where "Click left |A|" (the left stick, WASD here) becomes |L3|.
 ICON_TEXT_FILES = {'uc1': ('u1data/build/main/core.psarc',)}
+# Keyboard icons only: UC1 streams the big pictures of some prompts (the stick turned clockwise) from this
+# 1.4 GB pak; a small .patch with the redrawn pictures is laid over it as the game reads it.
+ICON_STREAM_FILES = {'uc1': ('u1data/build/main/texturedict1/ps4/chunk-1-tstrm.pak.patch',)}
 ICON_FONTS = [Path(os.environ.get('WINDIR', r'C:\Windows')) / 'Fonts' / name
               for name in ('arialbd.ttf', 'arial.ttf', 'segoeuib.ttf')] + \
              [Path('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf')]
@@ -503,8 +506,9 @@ def key_icon_files(settings, key):
         return [], ['no font for the key names']
     keys = {**DEFAULT_KEYS, **(controls.get('keys') or {})}
     made, errors = [], []
-    for name in ICON_FILES[key] + (ICON_TEXT_FILES.get(key, ()) if style == 'keys' else ()):
-        sources = [Path(d) / name for d in (settings.get('update_dir'), settings.get('game_dir')) if d]
+    extra = ICON_TEXT_FILES.get(key, ()) + ICON_STREAM_FILES.get(key, ()) if style == 'keys' else ()
+    for name in ICON_FILES[key] + extra:
+        sources = [Path(d) / name.removesuffix('.patch') for d in (settings.get('update_dir'), settings.get('game_dir')) if d]
         source = next((p for p in sources if p.is_file()), None)
         if not source:
             errors.append(f'no {name}')
@@ -515,7 +519,9 @@ def key_icon_files(settings, key):
         mark = target.with_name(target.name + '.txt')
         try:
             if not (target.is_file() and mark.is_file() and mark.read_text(encoding='utf-8') == stamp):
-                if name.endswith('core.psarc'):
+                if name.endswith('.patch'):
+                    from hud_icons import make_hud_patch as make
+                elif name.endswith('core.psarc'):
                     from key_icons import make_text_psarc as make
                 elif name.endswith('.psarc'):
                     from key_icons import make_icon_psarc as make  # Pillow
@@ -679,23 +685,91 @@ def make_shortcut(key, title):
 
 
 def version_tuple(text):
-    """'v0.3.1' / '0.3.1' / '0.3.5-beta' -> (0, 3, 1) / (0, 3, 5); None when it is not a version."""
+    """'v0.3.1' / '0.3.1' / '0.3.5-beta' -> (0, 3, 1, 1) / (0, 3, 5, 0): a beta sorts below its release,
+    so a beta player is offered the final version. None when it is not a version."""
     try:
-        return tuple(int(n) for n in text.strip().lstrip('vV').split('-')[0].split('.'))
+        text = text.strip().lstrip('vV')
+        return tuple(int(n) for n in text.split('-')[0].split('.')) + (0 if '-' in text else 1,)
     except (AttributeError, ValueError):
         return None
 
 
 def latest_release():
-    """(tag, page URL) of the newest GitHub Release, or None (offline, rate limit, bad answer)."""
+    """(tag, page URL, zip URL or None) of the newest GitHub Release, or None (offline, rate limit,
+    bad answer). The zip is the release's '-windows.zip' asset, the one the launcher can install."""
     request = urllib.request.Request(RELEASES_API, headers={'Accept': 'application/vnd.github+json',
                                                             'User-Agent': f'ucndc-launcher/{VERSION}'})
     try:
         with urllib.request.urlopen(request, timeout=5) as response:
             data = json.loads(response.read().decode('utf-8'))
-        return data['tag_name'], data.get('html_url') or RELEASES_PAGE
+        zips = [a.get('browser_download_url') for a in data.get('assets') or []
+                if str(a.get('name', '')).lower().endswith('-windows.zip')]
+        return data['tag_name'], data.get('html_url') or RELEASES_PAGE, zips[0] if zips else None
     except Exception:  # noqa: BLE001 (any failure just means no notice)
         return None
+
+
+UPDATE_DIR = PORT_DIR / '_update'
+
+
+def download_update(url, progress):
+    """Download the release zip to _update\\new.zip and unpack it to _update\\new; returns the folder
+    that holds 'Uncharted Launcher.exe'. progress(done, total) is called from this thread."""
+    if UPDATE_DIR.exists():
+        shutil.rmtree(UPDATE_DIR, ignore_errors=True)
+    UPDATE_DIR.mkdir(parents=True, exist_ok=True)
+    archive = UPDATE_DIR / 'new.zip'
+    request = urllib.request.Request(url, headers={'User-Agent': f'ucndc-launcher/{VERSION}'})
+    with urllib.request.urlopen(request, timeout=30) as response, open(archive, 'wb') as out:
+        total, done = int(response.headers.get('Content-Length') or 0), 0
+        while chunk := response.read(1 << 20):
+            out.write(chunk)
+            done += len(chunk)
+            progress(done, total)
+    import zipfile
+    target = UPDATE_DIR / 'new'
+    with zipfile.ZipFile(archive) as z:
+        for info in z.infolist():
+            # PowerShell zips use backslashes; never write outside the target folder.
+            parts = [p for p in info.filename.replace('\\', '/').split('/') if p not in ('', '.')]
+            if not parts or '..' in parts or ':' in parts[0]:
+                continue
+            path = target.joinpath(*parts)
+            if info.is_dir() or info.filename.endswith(('/', '\\')):
+                path.mkdir(parents=True, exist_ok=True)
+                continue
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with z.open(info) as src, open(path, 'wb') as dst:
+                shutil.copyfileobj(src, dst)
+    found = [p.parent for p in target.rglob('Uncharted Launcher.exe')]
+    if not found or not (found[0] / 'bin' / 'ucndc.exe').is_file():
+        raise RuntimeError('the zip has no Uncharted Launcher.exe + bin\\ucndc.exe')
+    return found[0]
+
+
+def start_update_script(source):
+    """Write and start _update\\update.bat: it waits for this launcher to close, copies the new files
+    over the install (saves, ucndc.ini and launcher.json are not in the zip, so they stay), starts the
+    new launcher and leaves a log in _update\\update.log."""
+    script = UPDATE_DIR / 'update.bat'
+    log = UPDATE_DIR / 'update.log'
+    exe = PORT_DIR / 'Uncharted Launcher.exe'
+    script.write_text('\r\n'.join([
+        '@echo off',
+        'chcp 65001 >nul',
+        'rem Uncharted launcher update: waits for the launcher to close, then copies the new version.',
+        ':wait',
+        f'tasklist /NH /FI "PID eq {os.getpid()}" 2>nul | find " {os.getpid()} " >nul && (ping -n 2 127.0.0.1 >nul & goto wait)',
+        f'robocopy "{source}" "{PORT_DIR}" /E /R:5 /W:1 /NP /LOG:"{log}"',
+        'if %ERRORLEVEL% GEQ 8 goto failed',
+        f'start "" "{exe}"',
+        'exit /b 0',
+        ':failed',
+        f'start "" notepad "{log}"',
+        f'start "" "{exe}"',
+        '']), encoding='utf-8')
+    subprocess.Popen(['cmd', '/c', str(script)], cwd=str(UPDATE_DIR), close_fds=True,
+                     creationflags=NO_WINDOW | getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0))
 
 
 def open_path(path):
@@ -758,14 +832,70 @@ class Launcher:
         bar = getattr(self, 'update_bar', None)
         if not self.newer or bar is None:
             return
-        tag, url = self.newer
+        tag, url, zip_url = self.newer
         for child in bar.winfo_children():
             child.destroy()
         mine = os.environ.get('UC_PRETEND_VERSION') or VERSION
-        self.label(bar, _(f'Saiu a versão {tag} do port (você tem a {mine}).',
-                          f'Port version {tag} is out (you have {mine}).'), 10, TEXT).pack(side='left', padx=12, pady=6)
-        self.button(bar, _('Baixar', 'Download'), lambda: webbrowser.open(url), primary=True).pack(side='right', padx=8, pady=4)
+        self.update_text = self.label(bar, _(f'Saiu a versão {tag} do port (você tem a {mine}).',
+                                             f'Port version {tag} is out (you have {mine}).'), 10, TEXT)
+        self.update_text.pack(side='left', padx=12, pady=6)
+        if zip_url and FROZEN and WINDOWS:
+            self.update_button = self.button(bar, _('Atualizar agora', 'Update now'), self.install_update, primary=True)
+            self.update_button.pack(side='right', padx=8, pady=4)
+            self.button(bar, _('Novidades', "What's new"), lambda: webbrowser.open(url)).pack(side='right', pady=4)
+        else:
+            self.button(bar, _('Baixar', 'Download'), lambda: webbrowser.open(url), primary=True).pack(side='right', padx=8, pady=4)
         bar.pack(fill='x', padx=24, pady=(0, 4), after=self.top_bar)
+
+    def install_update(self):
+        """Download the new release zip, unpack it next to the install and let update.bat copy it in
+        once this launcher has closed. Saves and settings are not in the zip, so they are kept."""
+        tag, _url, zip_url = self.newer
+        if self.process:
+            self.messagebox.showwarning(APP_NAME, _('Feche o jogo antes de atualizar.', 'Close the game before updating.'))
+            return
+        if not self.messagebox.askyesno(APP_NAME, _(
+                f'Baixar e instalar a versão {tag}? O launcher fecha e abre de novo sozinho. '
+                'Seus saves e configurações ficam como estão.',
+                f'Download and install version {tag}? The launcher closes and opens again by itself. '
+                'Your saves and settings stay as they are.')):
+            return
+        self.update_button.configure(state='disabled')
+        state = {'done': 0, 'total': 0, 'source': None, 'error': None}
+
+        def worker():
+            try:
+                state['source'] = download_update(zip_url, lambda d, t: state.update(done=d, total=t))
+            except Exception as error:  # noqa: BLE001 (shown to the player)
+                state['error'] = error
+
+        def poll():
+            if state['error'] is not None:
+                self.update_button.configure(state='normal')
+                self.update_text.configure(text=_('A atualização falhou.', 'The update failed.'))
+                self.messagebox.showerror(APP_NAME, _(f'Não foi possível baixar a atualização: {state["error"]}\n'
+                                                      'Você pode baixar o zip pela página de Novidades.',
+                                                      f'Could not download the update: {state["error"]}\n'
+                                                      "You can download the zip from the What's new page."))
+                return
+            if state['source'] is None:
+                mb = state['done'] / 1048576
+                text = (_(f'Baixando {tag}: {mb:.0f} de {state["total"] / 1048576:.0f} MB',
+                          f'Downloading {tag}: {mb:.0f} of {state["total"] / 1048576:.0f} MB') if state['total']
+                        else _(f'Baixando {tag}: {mb:.0f} MB', f'Downloading {tag}: {mb:.0f} MB'))
+                self.update_text.configure(text=text)
+                self.root.after(200, poll)
+                return
+            try:
+                start_update_script(state['source'])
+            except Exception as error:  # noqa: BLE001
+                self.update_button.configure(state='normal')
+                self.messagebox.showerror(APP_NAME, _(f'Não foi possível instalar a atualização: {error}',
+                                                      f'Could not install the update: {error}'))
+                return
+            self.root.destroy()
+        threading.Thread(target=worker, daemon=True).start()
+        self.root.after(200, poll)
 
     # -- layout -----------------------------------------------------------------------------
     def label(self, parent, text, size=10, color=TEXT, bold=False, **kw):
@@ -959,8 +1089,38 @@ class Launcher:
         win.transient(self.root)
         win.resizable(False, True)
         ini = read_ini()
-        body = tk.Frame(win, bg=PANEL)
-        body.pack(fill='both', expand=True, padx=16, pady=16)
+        # The buttons sit at the bottom and the settings scroll above them: with Advanced open the
+        # list is taller than small screens (GitHub issue: no Save button at 1080p with scaling).
+        buttons = tk.Frame(win, bg=BG)
+        buttons.pack(side='bottom', fill='x', padx=16, pady=(0, 16))
+        outer = tk.Frame(win, bg=PANEL)
+        outer.pack(fill='both', expand=True, padx=16, pady=16)
+        canvas = tk.Canvas(outer, bg=PANEL, highlightthickness=0)
+        scroll = ttk.Scrollbar(outer, orient='vertical', command=canvas.yview)
+        across = ttk.Scrollbar(outer, orient='horizontal', command=canvas.xview)
+        canvas.configure(yscrollcommand=scroll.set, xscrollcommand=across.set)
+        scroll.pack(side='right', fill='y')
+        across.pack(side='bottom', fill='x')
+        canvas.pack(side='left', fill='both', expand=True)
+        body = tk.Frame(canvas, bg=PANEL)
+        canvas.create_window((0, 0), window=body, anchor='nw')
+
+        def fit(_event=None):
+            width, height = body.winfo_reqwidth(), body.winfo_reqheight()
+            canvas.configure(scrollregion=(0, 0, width, height),
+                             width=min(width, max(400, win.winfo_screenwidth() - 160)),
+                             height=min(height, max(200, win.winfo_screenheight() - 200)))
+            win.after_idle(place)
+
+        def place():
+            win.update_idletasks()
+            win.geometry('+%d+%d' % (max(0, (win.winfo_screenwidth() - win.winfo_reqwidth()) // 2), 20))
+        body.bind('<Configure>', fit)
+
+        def wheel(event):
+            canvas.yview_scroll(-1 if event.delta > 0 else 1, 'units')
+            return 'break'
+        win.bind('<MouseWheel>', wheel)
         pick = lambda pairs: [n[0] if LANG == 'pt' else n[1] for _v, n in pairs]
         self.label(body, _('Imagem e desempenho', 'Display and performance'), 11, TEXT, True).grid(row=0, column=0, columnspan=2, sticky='w', pady=(0, 6))
         mode = tk.StringVar(value=pick(DISPLAY_MODES)[[m for m, _n in DISPLAY_MODES].index(display_mode())])
@@ -978,6 +1138,7 @@ class Launcher:
         for row, (title, widget) in enumerate(rows, start=1):
             self.label(body, title, 10, MUTED).grid(row=row, column=0, sticky='w', pady=3)
             widget.grid(row=row, column=1, sticky='w', padx=10)
+            widget.bind('<MouseWheel>', wheel)  # scroll the window, not the choice
         check = dict(bg=PANEL, fg=TEXT, selectcolor=CARD, activebackground=PANEL, activeforeground=TEXT,
                      font=('Segoe UI', 10), anchor='w')
         tk.Checkbutton(body, text=_('VSync (sem tearing; recomendado)', 'VSync (no tearing; recommended)'),
@@ -1007,7 +1168,8 @@ class Launcher:
 
         def toggle(parent, name, var):
             help_text = TOGGLE_HELP.get(name, ('', ''))[0 if LANG == 'pt' else 1]
-            tk.Checkbutton(parent, text=f'{help_text}  ({public_name(name)})', variable=var, **check).pack(anchor='w')
+            tk.Checkbutton(parent, text=f'{help_text}  ({public_name(name)})', variable=var, wraplength=420,
+                           justify='left', **check).pack(anchor='w')
         for name in dict.fromkeys(names):
             if name in FIXED:
                 continue
@@ -1028,6 +1190,7 @@ class Launcher:
                 advanced.grid(row=9, column=0, columnspan=2, sticky='w', pady=(6, 0))
             else:
                 advanced.grid_forget()
+            canvas.yview_moveto(0)
         tk.Checkbutton(body, text=_('Avançado: escolher otimizações', 'Advanced: choose optimizations'),
                        variable=shown, command=show_advanced, **check).grid(row=8, column=0, columnspan=2, sticky='w')
         show_advanced()
@@ -1055,8 +1218,6 @@ class Launcher:
             self.settings['show_advanced'] = shown.get()
             save_settings(self.settings)
             win.destroy()
-        buttons = tk.Frame(win, bg=BG)
-        buttons.pack(fill='x', padx=16, pady=(0, 16))
         self.button(buttons, _('Salvar', 'Save'), save, primary=True).pack(side='right')
         self.button(buttons, _('Cancelar', 'Cancel'), win.destroy).pack(side='right', padx=6)
         self.button(buttons, _('Restaurar padrão', 'Restore defaults'), reset).pack(side='left')

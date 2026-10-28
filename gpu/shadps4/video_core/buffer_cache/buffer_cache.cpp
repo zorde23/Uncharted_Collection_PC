@@ -857,6 +857,8 @@ bool BufferCache::FastDoneReadback(VAddr device_addr, u64 size, bool is_write) {
         for (auto& copy : copies) {
             readback->copies.push_back(
                 {arena_base + copy.srcOffset, copy.dstOffset, copy.size});
+            Gow3WriteLog::ClobberSnap(readback->download.mapped + copy.dstOffset,
+                                      arena_base + copy.srcOffset, copy.size);
             copy.dstOffset += readback->download.offset;
         }
         // Only windows whose last write (and the tick after it) has finished: checked under
@@ -1316,6 +1318,8 @@ std::shared_ptr<BufferCache::AsyncReadback> BufferCache::DownloadWindowsAsync(
         const VAddr arena_base = entry.window->arena->cpu_addr;
         for (auto& copy : entry.copies) {
             readback->copies.push_back({arena_base + copy.srcOffset, copy.dstOffset, copy.size});
+            Gow3WriteLog::ClobberSnap(readback->download.mapped + copy.dstOffset,
+                                      arena_base + copy.srcOffset, copy.size);
             copy.dstOffset += readback->download.offset;
         }
     }
@@ -1598,6 +1602,13 @@ void BufferCache::CompleteAsyncReadback(AsyncReadback& readback, VAddr device_ad
     }
     const auto& download = readback.download;
     download.buffer->Invalidate(download.offset, download.size);
+    if (Gow3WriteLog::ClobberLog()) {
+        for (const auto& copy : readback.copies) {
+            Gow3WriteLog::ClobberCheck(download.mapped + copy.staging_offset, copy.address,
+                                       download.mapped + copy.staging_offset, copy.size,
+                                       readback.fast_slot != ~0u ? "buffer fast" : "buffer async");
+        }
+    }
     if (ReadbackLabelGuard()) {
         // Labels written since this copy was recorded keep their newer bytes: the copy lands
         // around them (under async_mutex, so a label noted later finds the entry gone).
@@ -1740,6 +1751,7 @@ void BufferCache::QueueLeafDownload(const Buffer* buffer, u64 offset, VAddr addr
         leaf_pending_count.fetch_add(1, std::memory_order_release);
     }
     const vk::BufferCopy copy{offset, leaf_staging.offset + u64{slot} * LeafSlotSize, size};
+    Gow3WriteLog::ClobberSnap(leaf_staging.mapped + u64{slot} * LeafSlotSize, address, size);
     runtime.CopyBuffer(buffer, leaf_staging.buffer, {&copy, 1});
     Gow3Stats::uc3_leaf_dl_queued.fetch_add(1, std::memory_order_relaxed);
 }
@@ -1761,6 +1773,7 @@ void BufferCache::CompleteLeafDownloads() {
         leaf_pending_count.fetch_sub(1, std::memory_order_release);
         if (leaf.dirty) {
             Gow3Stats::uc3_leaf_dl_dirty.fetch_add(1, std::memory_order_relaxed);
+            Gow3WriteLog::ClobberDrop(leaf_staging.mapped + u64{leaf.slot} * LeafSlotSize);
             return true;
         }
         if (!invalidated) {
@@ -1769,6 +1782,7 @@ void BufferCache::CompleteLeafDownloads() {
         }
         const u8* data = leaf_staging.mapped + u64{leaf.slot} * LeafSlotSize;
         auto* dst = std::bit_cast<u8*>(leaf.address);
+        Gow3WriteLog::ClobberCheck(data, leaf.address, data, leaf.size, "leaf");
         Gow3WriteLog::NoteDownload(leaf.address, data, leaf.size);
         memory->TryWriteBacking(dst, data, leaf.size);
         Vulkan::SrtNoteReadback(leaf.address, leaf.size);
@@ -2167,7 +2181,19 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
 
 std::pair<const Buffer*, u64> BufferCache::ObtainBufferForImage(VAddr device_addr, u32 size) {
     texture_cache.ResolveReadbacks(device_addr, size, true, ReadbackSource::BufferForImage);
-    if (IsRegionGpuModified(device_addr, size)) {
+    // uc1 (GOW3_WATCH_ADDR, bright crates): which source an upload of the watched image takes.
+    static const VAddr watch = [] {
+        const char* env = std::getenv("GOW3_WATCH_ADDR");
+        return env ? VAddr(std::strtoull(env, nullptr, 16)) : VAddr(0);
+    }();
+    const bool gpu_modified = IsRegionGpuModified(device_addr, size);
+    if (watch && watch >= device_addr && watch < device_addr + size) {
+        std::printf("ucndc: watch image upload %#llx size %#x from %s\n",
+                    (unsigned long long)device_addr, size,
+                    gpu_modified ? "GPU buffer (region GPU-modified)" : "guest memory");
+        std::fflush(stdout);
+    }
+    if (gpu_modified) {
         return ObtainBuffer(device_addr, size, false);
     }
     const auto staging = staging_pool.Request(size, VideoCore::MemoryType::HostUncached,
