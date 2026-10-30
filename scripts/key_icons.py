@@ -94,6 +94,24 @@ def game_key(w, h, lit=False, material=None):
     return out
 
 
+def key_cluster(img, box, names, font_path):
+    """The four movement keys as on the keyboard (up above left, down, right), each a small game
+    keycap with its letter; `names` in the order up, left, down, right."""
+    x, y, w, h = box
+    k = min((w - 2) / 3.15, (h - 2) / 2.1)
+    gap = k * 0.075
+    gx, gy = x + (w - (3 * k + 2 * gap)) / 2, y + (h - (2 * k + gap)) / 2
+    f = ImageFont.truetype(font_path, int(k * 0.62))
+    d = ImageDraw.Draw(img)
+    for label, (i, j) in zip(names, ((1, 0), (0, 1), (1, 1), (2, 1))):
+        bx, by = gx + i * (k + gap), gy + j * (k + gap)
+        img.alpha_composite(game_key(k, k), (int(round(bx)), int(round(by))))
+        l, t, r, b = d.textbbox((0, 0), label, font=f)
+        tx, ty = bx + k / 2 - (r - l) / 2 - l, by + k / 2 - (b - t) / 2 - t
+        d.text((tx + 1, ty + 1), label, font=f, fill=(0, 0, 0, 255))  # the game's dark shadow
+        d.text((tx, ty), label, font=f, fill=INK)
+
+
 def keycap(img, box, label, font_path):
     """A key with the label at LABEL size; a label wider than the key can get is squeezed sideways,
     so every label keeps the same height."""
@@ -434,7 +452,10 @@ def draw_glyph(img, box, button, keys, font_path, short=SHORT):
             names = ['1-4']
         return keycap(img, box, '/'.join(n for n in names if n) or '?', font_path)
     if button == 'ls':
-        names = ''.join(first_key(keys, a) for a in ('ls_up', 'ls_left', 'ls_down', 'ls_right'))
+        names = [first_key(keys, a) for a in ('ls_up', 'ls_left', 'ls_down', 'ls_right')]
+        if all(len(n) == 1 for n in names) and KEY_MATERIAL is not None:
+            return key_cluster(img, box, names, font_path)
+        names = ''.join(names)
         return keycap(img, box, names if len(names) == 4 else 'Mover', font_path)
     if button in ('rs', 'stick'):
         return mouse(img, box, None)

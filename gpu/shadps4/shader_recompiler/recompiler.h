@@ -34,6 +34,11 @@ constexpr u64 Uc3MovieShaderHash = 0xc85d9816ull;
 u32 Uc3MovieFixKey();
 void Uc3MovieSize(u32& width, u32& height);
 
+// uc3: GOW3_DOF_FOCUS_FIX=1 with GOW3_UC3_RES=WxH (see recompiler.cpp). DofFocusFixKey() is 0 when
+// off or at 1920x1080, otherwise a value that changes with the resolution (in the shader's cache name).
+constexpr u64 DofFocusShaderHash = 0x9f801363ull;
+u32 DofFocusFixKey();
+
 [[nodiscard]] IR::Program TranslateProgram(const std::span<const u32>& code, Pools& pools,
                                            Info& info, RuntimeInfo& runtime_info,
                                            const Profile& profile);

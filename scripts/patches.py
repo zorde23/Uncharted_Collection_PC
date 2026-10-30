@@ -306,6 +306,66 @@ def compile_external(selected, segments):
     return writes
 
 
+# Uncharted menus: the option controls draw the d-pad next to "SELECT" from the menu code's own
+# copies of these strings (UC1 menucontrol.cpp, UC2 menucontrol.cpp, UC3 menucontrolpage.cpp); the
+# HUD's weapon hint keeps its own |D-PAD-LR|. With keyboard icons the d-pad is the weapon keys,
+# while WASD also works in the menus: (signature, the strings in it to show as the left stick).
+MENU_DPAD_STRINGS=[
+    (b'|X|\0|C|\0|D-PAD|\0|S| %s\0', [b'|D-PAD|']),                                 # UC1
+    (b'|C|\0|D-PAD-LR|\0|D-PAD-UD|\0|D-PAD|\0', [b'|D-PAD-LR|', b'|D-PAD-UD|']),     # UC2
+    (b'PerformLayout\0|D-PAD-UD|\0|D-PAD-LR|\0', [b'|D-PAD-UD|', b'|D-PAD-LR|']),     # UC3
+]
+
+
+def menu_wasd_writes(image):
+    """GOW3_MENU_WASD=1: the menu controls show the left stick (WASD) instead of the d-pad."""
+    for signature,strings in MENU_DPAD_STRINGS:
+        if image.count(signature)!=1:
+            continue
+        at=image.find(signature)
+        return [(at+signature.find(name+b'\0'),b'|LA|\0') for name in strings]
+    return []
+
+
+# Naughty Dog's dev menu and its debug text (FPS, ms, PlayGo, the active task, a timer): the dev menu
+# flag's store, mov byte [r14+0x39ba],1 (0 = on, illusion0001's "Enable Dev Menu"). Same code in
+# the three 1.00 and 1.02 executables, but for the jump between the stores.
+DEV_MENU_SITE=re.compile(re.escape(bytes.fromhex('41c686b739000001'))+b'(?:\xeb.|\xe9....)'
+                         +re.escape(bytes.fromhex('41c686ba390000'))+b'([\x00\x01])',re.S)
+# illusion0001's "Hide Debug Text When Dev Menu Enabled" for the 1.02 executables, by image size:
+# (code site, its original bytes, new bytes), then a .bss flag set to 1.
+HIDE_DEBUG_TEXT={
+    9879376: ((0x6cfea0, '4180bfe847000000', '4180bfe947000001'), 0xfa7e41),       # UC1 eboot.bin
+    17217632: ((0x7f8f4b, '4180bc242148000000', '4180bc242248000001'), 0x15640b2),  # UC2
+    24164912: ((0x96cb8b, '4180bc24014c000000', '4180bc24ff4b000001'), 0x1f3ee60),  # UC3
+}
+
+
+def dev_menu_site(image):
+    """(image offset of the flag byte, True when the executable already has the dev menu on), or None."""
+    hits=list(DEV_MENU_SITE.finditer(image))
+    return (hits[0].start(1),hits[0].group(1)==b'\0') if len(hits)==1 else None
+
+
+def dev_menu_writes(image):
+    """GOW3_DEV_MENU=1 (test, off): the dev menu and its debug text on."""
+    site=dev_menu_site(image)
+    return [(site[0],b'\0')] if site and not site[1] else []
+
+
+def hide_debug_text_writes(image):
+    """GOW3_HIDE_DEBUG_TEXT=1 (the launcher's default): a modified executable that comes with the dev
+    menu on gets its debug text hidden."""
+    known=HIDE_DEBUG_TEXT.get(len(image))
+    if not known:
+        return []
+    (at,old,new),flag=known
+    at-=EBOOT_BASE
+    if image[at:at+len(old)//2]!=bytes.fromhex(old):
+        return []
+    return [(at,bytes.fromhex(new)),(flag-EBOOT_BASE,b'\1')]
+
+
 def write_patches(out, writes):
     # G3PATCH2: the patch base, so the loader can rebase pointers the patches write into
     # relocated slots.
@@ -325,8 +385,27 @@ def main():
     title=game_title_id(a.game_dir)
     profile=game_profile_for(a.game_dir)
     if not profile:
-        write_patches(a.out,[])
-        print(f'Patches: no patch profile for {title}: none applied')
+        writes=[]
+        if os.environ.get('GOW3_MENU_WASD')=='1':
+            writes=menu_wasd_writes(eboot_image((a.out/'eboot.elf').read_bytes()))
+            print(f'Patches: menu WASD icons {"applied" if writes else "not found in this executable"}')
+        image=eboot_image((a.out/'eboot.elf').read_bytes())
+        site=dev_menu_site(image)
+        if site and site[1]:
+            print('Patches: this executable comes with the dev menu on (modified dump)')
+        # GOW3_DEV_MENU=1 (test, off): dev menu on; =2: on as a modified dump has it (the text is hidden).
+        dev_menu=os.environ.get('GOW3_DEV_MENU')
+        if dev_menu in ('1','2'):
+            dev=dev_menu_writes(image)
+            print(f'Patches: dev menu {"enabled" if dev else "already on or not found in this executable"}')
+            writes+=dev
+        if site and (site[1] or dev_menu=='2') and dev_menu!='1' and os.environ.get('GOW3_HIDE_DEBUG_TEXT')=='1':
+            hide=hide_debug_text_writes(image)
+            print(f'Patches: dev menu debug text {"hidden" if hide else "not hidden (unknown executable)"}')
+            writes+=hide
+        write_patches(a.out,writes)
+        if not writes:
+            print(f'Patches: no patch profile for {title}: none applied')
         return
     ids,xml,tag,_name=profile
     sha=eboot_sha256(a.game_dir)

@@ -39,7 +39,7 @@ LOG_FILE = USER_DIR / 'last_run.log'
 INPUT_FILE = DATA_DIR / 'input.ini'
 APP_NAME = 'Uncharted Collection PC'
 EXE_NAME = 'Uncharted Launcher.exe'
-VERSION = '0.3.7'
+VERSION = '0.3.8'
 RELEASES_API = 'https://api.github.com/repos/zorde23/Uncharted_Collection_PC/releases/latest'
 RELEASES_PAGE = 'https://github.com/zorde23/Uncharted_Collection_PC/releases/latest'
 NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
@@ -47,7 +47,7 @@ TESTED_TITLE = 'CUSA02344'
 
 # Options every game starts with (all of them are off by default in the code).
 COMMON = {
-    'GOW3_READBACKS': '2', 'GOW3_FRAME_STATS': '1', 'GOW3_READBACK_ASYNC': '1', 'GOW3_LEAF_COPY': '1',
+    'GOW3_READBACKS': '2', 'GOW3_FRAME_STATS': '1', 'GOW3_LEAF_COPY': '1',
     'GOW3_SCALAR_COPY_HLE': '1', 'GOW3_HLE_INVALIDATE': '1', 'GOW3_EAGER_SUBMIT': '128',
     'GOW3_EAGER_SUBMIT_US': '1000', 'GOW3_ASYNC_SUBMIT': '1',
     'GOW3_RING_COPY_THREAD': '1', 'GOW3_DEFERRED_SUBMIT': '1', 'GOW3_RING_DEDUP': '1',
@@ -57,12 +57,15 @@ COMMON = {
     # Guest stores of red-zone leaf functions run 128 bytes below rsp, so a fault's frame does not
     # overwrite their locals (crashes on Intel 12th gen and later, UC1 0x64011d / UC3 0x12d83fe).
     'GOW3_RED_ZONE': '1',
+    # The game mixes 7.1 when told the output has 8 channels (sceAudioOutGetPortState); 'auto' tells it
+    # so only when the Windows output is 5.1/7.1, and the port passes the channels on (0.3.8, tested 7.1).
+    'GOW3_AUDIO_SURROUND': 'auto',
 }
 # key, title, executable, (status pt, status en), extra options
 GAMES = [
     ('uc1', "Uncharted: Drake's Fortune", 'eboot.bin', ('Jogável', 'Playable'),
      {'GOW3_COMPUTE_PIPE': '1', 'GOW3_LOW_IMAGE': '1', 'GOW3_AJM_END_RULES': '1', 'GOW3_EOP_TICK_WAIT': '1',
-      'GOW3_MOUSE_AIM_U1_ALL': '1', 'GOW3_READBACK_SIDEQ': '1',
+      'GOW3_MOUSE_AIM_U1_ALL': '1', 'GOW3_READBACK_ASYNC': '1', 'GOW3_READBACK_SIDEQ': '1',
       # From UC3 (tested on UC1 2026-10-20: the flashlight works with them). FAULT_WRITES: crash log aid.
       'GOW3_SYNC_SMALL_TARGETS': '1', 'GOW3_JOB_SPIN': '100', 'GOW3_JOB_SLEEP': '1', 'GOW3_MIP_FIX': '1',
       'GOW3_SCOPE_SPLIT_SCALAR': '1', 'GOW3_DEPTH_KEEP_CLEAR': '1', 'GOW3_FAULT_WRITES': '1',
@@ -75,32 +78,40 @@ GAMES = [
       'GOW3_MOUSE_U1_AIM_SEED_FOLLOW': '1', 'GOW3_MOUSE_U1_FAST_STICK': '1', 'GOW3_MOUSE_U1_HOLD_INPUT': '1',
       'GOW3_MOUSE_U1_GUN': '1', 'GOW3_MOUSE_U1_CAR': '1', 'GOW3_MOUSE_PUSH': '0',
       # 0.3.7: videos keep updating (frozen picture), texture memory limit from the driver's budget.
-      'GOW3_VIDEO_INVALIDATE': '1', 'GOW3_GC_LIVE_BUDGET': '1'}),
+      'GOW3_VIDEO_INVALIDATE': '1', 'GOW3_GC_LIVE_BUDGET': '1',
+      # 0.3.8: a draw waits for its shader still compiling instead of vanishing (submarine flicker).
+      'GOW3_SHADER_WAIT_MS': '50'}),
     ('uc2', 'Uncharted 2: Among Thieves', 'big2-ps4_Shipping.elf', ('Jogável', 'Playable'),
-     # Without GOW3_COMPUTE_PIPE: with it the train carriage in the prologue falls too early. The two
-     # in-order options keep the rooftop at 60 FPS; the train jump is still timing-sensitive with them.
-     {'GOW3_HLE_INORDER': '1', 'GOW3_ACB_DISPATCH_PIPE': '1', 'GOW3_READBACK_SIDEQ': '1',
-      # From UC3 (2026-10-22, Matheus); COMPUTE_PIPE stays off (train).
+     # GOW3_READBACK_ASYNC and GOW3_READBACK_SIDEQ alone slow Drake's walk and run at 60 FPS (the
+     # prologue train carriage outran him): the scalar copy HLE's guest copies into 0x103a1xxxxx race
+     # the game. GOW3_SCALAR_COPY_GPU_RANGE leaves the ones below 0x103a148000 on the GPU (car 3.2-3.5
+     # m/s, no flicker, 0 A1 divergences; above it white flicker, 2026-10-30). The two in-order
+     # options keep the rooftop at 60 FPS.
+     {'GOW3_HLE_INORDER': '1', 'GOW3_ACB_DISPATCH_PIPE': '1', 'GOW3_COMPUTE_PIPE': '1',
+      'GOW3_READBACK_ASYNC': '1', 'GOW3_READBACK_SIDEQ': '1',
+      'GOW3_SCALAR_COPY_GPU_RANGE': '0x103a100000-0x103a148000',
+      # From UC3 (2026-10-22, Matheus).
       'GOW3_SYNC_SMALL_TARGETS': '1', 'GOW3_JOB_SPIN': '100', 'GOW3_JOB_SLEEP': '1', 'GOW3_MIP_FIX': '1',
       'GOW3_SCOPE_SPLIT_SCALAR': '1', 'GOW3_DEPTH_KEEP_CLEAR': '1',
       # 0.3.7: aim focus without whole-screen blur (Umar-Qayyum-dev, Supermedo's uncharted_pc), videos
       # keep updating, texture memory limit from the driver's budget.
-      'GOW3_TINY_READBACK': '1', 'GOW3_VIDEO_INVALIDATE': '1', 'GOW3_GC_LIVE_BUDGET': '1'}),
+      'GOW3_TINY_READBACK': '1', 'GOW3_VIDEO_INVALIDATE': '1', 'GOW3_GC_LIVE_BUDGET': '1',
+      'GOW3_SHADER_WAIT_MS': '50'}),
     # uc3 without GOW3_READBACK_SIDEQ: with it Drake's scarf jumps around in the desert (the guest
     # resumes before the graphics work behind a readback runs); no FPS difference measured.
     ('uc3', "Uncharted 3: Drake's Deception", 'big3-ps4_Shipping.elf', ('Jogável · 60 FPS', 'Playable · 60 FPS'),
-     {'GOW3_COMPUTE_PIPE': '1', 'GOW3_SYNC_SMALL_TARGETS': '1', 'GOW3_JOB_SPIN': '100', 'GOW3_JOB_SLEEP': '1',
-      'GOW3_MIP_FIX': '1', 'GOW3_MOUSE_EDGE_AIM': '1', 'GOW3_SCOPE_SPLIT_SCALAR': '1',
+     {'GOW3_COMPUTE_PIPE': '1', 'GOW3_READBACK_ASYNC': '1', 'GOW3_SYNC_SMALL_TARGETS': '1', 'GOW3_JOB_SPIN': '100',
+      'GOW3_JOB_SLEEP': '1', 'GOW3_MIP_FIX': '1', 'GOW3_MOUSE_EDGE_AIM': '1', 'GOW3_SCOPE_SPLIT_SCALAR': '1',
       'GOW3_DEPTH_KEEP_CLEAR': '1',
       # 0.3.7: Sully's shirt on NVIDIA (BilalReloaded, via Supermedo's uncharted_pc), videos keep
       # updating, texture memory limit from the driver's budget.
-      'GOW3_LDS_BARRIERS_MULTIWAVE': '1', 'GOW3_VIDEO_INVALIDATE': '1', 'GOW3_GC_LIVE_BUDGET': '1'}),
+      'GOW3_LDS_BARRIERS_MULTIWAVE': '1', 'GOW3_VIDEO_INVALIDATE': '1', 'GOW3_GC_LIVE_BUDGET': '1',
+      'GOW3_SHADER_WAIT_MS': '50'}),
 ]
 # Off unless chosen in Options > Advanced (launcher.json 'experimental'): (games, value).
-EXPERIMENTAL = {'GOW3_PREP_TRUST_A1': (('uc3',), '1'), 'GOW3_PREP_WORKERS': (('uc1', 'uc2', 'uc3'), '2'),
-                # 0.3.7: the game mixes 7.1 when told the output has 8 channels (sceAudioOutGetPortState);
-                # the port passes them to a 5.1/7.1 Windows output, or folds them to stereo.
-                'GOW3_AUDIO_SURROUND': (('uc1', 'uc2', 'uc3'), '1')}
+EXPERIMENTAL = {'GOW3_PREP_TRUST_A1': (('uc1', 'uc3'), '1'), 'GOW3_PREP_WORKERS': (('uc1', 'uc2', 'uc3'), '2')}
+# On unless turned off in Options > Advanced > Debug (launcher.json 'disabled'): (games, value).
+DEBUG = {'GOW3_HIDE_DEBUG_TEXT': (('uc1', 'uc2', 'uc3'), '1')}
 # ucndc.ini values the games were tested with, written when the file does not exist yet.
 # Only keys the Uncharted games use (render_resolution, engine_fps, fsr1, rcas and upscaler are GoW3 patches).
 INI_DEFAULTS = {'display_mode': 'windowed', 'vsync': '1', 'fps_limit': '0',
@@ -114,13 +125,18 @@ DEFAULTS = {'game_dir': '', 'update_dir': '', 'language': '', 'last_game': 'uc3'
 # predate UC1 and UC2, whose executables share UC3's video settings and memory table). Above 1080p the game's own targets
 # grow (GOW3_UC3_RES); its render target heaps and GPU memory grow with them, and the intro movies
 # are scaled to the screen. Measured: 1440p and 4K on an RX 6750 XT; the image is scaled to the window.
-RESOLUTIONS = [('1080', ('1920x1080 (padrão)', '1920x1080 (default)')),
+RESOLUTIONS = [('720', ('1280x720', '1280x720')),
+               ('900', ('1600x900', '1600x900')),
+               ('1080', ('1920x1080 (padrão)', '1920x1080 (default)')),
                ('1440', ('2560x1440', '2560x1440')),
                ('2160', ('3840x2160 (4K)', '3840x2160 (4K)'))]
 UC3_RESOLUTION_ENV = {
-    '1440': {'GOW3_UC3_RES': '2560x1440', 'GOW3_UC3_RES_ALL': '1', 'GOW3_UC3_MOVIE_FIX': '1',
+    # Below 1080p the game's heaps are big enough as they are; the movies and the aim focus still need their fixes.
+    '720': {'GOW3_UC3_RES': '1280x720', 'GOW3_UC3_RES_ALL': '1', 'GOW3_UC3_MOVIE_FIX': '1', 'GOW3_DOF_FOCUS_FIX': '1'},
+    '900': {'GOW3_UC3_RES': '1600x900', 'GOW3_UC3_RES_ALL': '1', 'GOW3_UC3_MOVIE_FIX': '1', 'GOW3_DOF_FOCUS_FIX': '1'},
+    '1440': {'GOW3_UC3_RES': '2560x1440', 'GOW3_UC3_RES_ALL': '1', 'GOW3_UC3_MOVIE_FIX': '1', 'GOW3_DOF_FOCUS_FIX': '1',
              'GOW3_UC3_RTHEAP_MB': '512', 'GOW3_DMEM_MB': '6144'},
-    '2160': {'GOW3_UC3_RES': '3840x2160', 'GOW3_UC3_RES_ALL': '1', 'GOW3_UC3_MOVIE_FIX': '1',
+    '2160': {'GOW3_UC3_RES': '3840x2160', 'GOW3_UC3_RES_ALL': '1', 'GOW3_UC3_MOVIE_FIX': '1', 'GOW3_DOF_FOCUS_FIX': '1',
              'GOW3_UC3_RTHEAP_MB': '1792', 'GOW3_UC3_RT_MB': '448', 'GOW3_DMEM_MB': '8192'},
 }
 # What each optimization does (Options > Advanced); the games turn them on by default.
@@ -129,10 +145,11 @@ TOGGLE_HELP = {
     'GOW3_READBACK_FAST': ('Leitura rápida de buffers', 'Fast buffer readbacks'),
     'GOW3_READBACK_FAST_WAIT': ('Espera só a escrita certa da GPU', 'Wait only for the right GPU write'),
     'GOW3_READBACK_FAST_SIDEQ': ('Leituras na fila de transferência', 'Readbacks on the transfer queue'),
-    'GOW3_READBACK_SIDEQ': ('Fila lateral de leituras', 'Side readback queue'),
+    'GOW3_READBACK_SIDEQ': ('Fila lateral de leituras (UC1 e UC2)', 'Side readback queue (UC1 and UC2)'),
+    'GOW3_SCALAR_COPY_GPU_RANGE': ('Cópias de constantes do trem na GPU (UC2)', 'Train constant copies on the GPU (UC2)'),
     'GOW3_SCALAR_COPY_HLE': ('Cópia de constantes em código nativo', 'Constant copies in native code'),
     'GOW3_HLE_INVALIDATE': ('Avisa os caches da cópia nativa (evita texturas trocadas)', 'Tell caches about native copies (no swapped textures)'),
-    'GOW3_COMPUTE_PIPE': ('Atalho no processamento de compute (UC1 e UC3)', 'Compute processing shortcut (UC1 and UC3)'),
+    'GOW3_COMPUTE_PIPE': ('Atalho no processamento de compute', 'Compute processing shortcut'),
     'GOW3_LEAF_COPY': ('Cópia das folhas de recursos', 'Resource leaf copies'),
     'GOW3_EAGER_SUBMIT': ('Envia comandos à GPU mais cedo', 'Submit GPU work earlier'),
     'GOW3_EAGER_SUBMIT_US': ('Intervalo do envio antecipado', 'Early submit interval'),
@@ -155,21 +172,23 @@ TOGGLE_HELP = {
     'GOW3_MOUSE_EDGE_AIM': ('Mouse na mira pendurado e escalando (UC3)', 'Mouse aiming while hanging and climbing (UC3)'),
     'GOW3_SCOPE_SPLIT_SCALAR': ('Névoa dos cones de luz sem cunhas pretas (UC1, UC2 e UC3)', 'Light cone fog without black wedges (UC1, UC2 and UC3)'),
     'GOW3_DEPTH_KEEP_CLEAR': ('Sombras e luzes sem piscar (UC1, UC2 e UC3)', 'Shadows and lights without flicker (UC1, UC2 and UC3)'),
-    'GOW3_PREP_TRUST_A1': ('Experimental: preparo de desenhos mais rápido (+FPS, UC3)', 'Experimental: faster draw preparation (+FPS, UC3)'),
+    'GOW3_PREP_TRUST_A1': ('Experimental: preparo de desenhos mais rápido (+FPS, UC1 e UC3)', 'Experimental: faster draw preparation (+FPS, UC1 and UC3)'),
     'GOW3_PREP_WORKERS': ('Experimental: 2 threads de preparo (pode ajudar CPUs de 4 e 6 núcleos)', 'Experimental: 2 preparation threads (may help 4 and 6 core CPUs)'),
     'GOW3_JOB_SLEEP': ('Threads de jobs podem dormir no gameplay (menos CPU)', 'Job threads may sleep in gameplay (less CPU)'),
-    'GOW3_AUDIO_SURROUND': ('Experimental: som surround 5.1/7.1 (caixas ou fone surround configurados no Windows)',
-                            'Experimental: 5.1/7.1 surround sound (speakers or surround headphones set up in Windows)'),
     'GOW3_TINY_READBACK': ('Foco da mira sem borrar a tela (UC2)', 'Aim focus without blurring the screen (UC2)'),
     'GOW3_LDS_BARRIERS_MULTIWAVE': ('Roupa do Sully sem esticar em placas NVIDIA (UC3)', "Sully's shirt without stretching on NVIDIA cards (UC3)"),
     'GOW3_VIDEO_INVALIDATE': ('Vídeos não congelam a imagem (UC1, UC2 e UC3)', 'Videos do not freeze on one picture (UC1, UC2 and UC3)'),
+    'GOW3_SHADER_WAIT_MS': ('Objetos não piscam na primeira vez que aparecem (UC1, UC2 e UC3)',
+                            'Objects do not flicker the first time they appear (UC1, UC2 and UC3)'),
+    'GOW3_HIDE_DEBUG_TEXT': ('Esconde o texto de debug da Naughty Dog (FPS, ms, PlayGo) de dumps modificados com o dev menu ligado',
+                             "Hide Naughty Dog's debug text (FPS, ms, PlayGo) of modified dumps with the dev menu on"),
     'GOW3_GC_LIVE_BUDGET': ('Limite de memória de texturas pelo que a placa tem livre (menos descarte em placas de 8 GB)',
                             'Texture memory limit from what the card has free (fewer evictions on 8 GB cards)'),
 }
 # Options > Advanced shows the toggles in two lists: these fix bugs, the others are for performance.
-FIX_TOGGLES = {'GOW3_MOUSE_AIM_U1_ALL', 'GOW3_SYNC_SMALL_TARGETS', 'GOW3_MIP_FIX', 'GOW3_MOUSE_EDGE_AIM',
+FIX_TOGGLES = {'GOW3_MOUSE_AIM_U1_ALL', 'GOW3_SCALAR_COPY_GPU_RANGE', 'GOW3_SYNC_SMALL_TARGETS', 'GOW3_MIP_FIX', 'GOW3_MOUSE_EDGE_AIM',
                'GOW3_SCOPE_SPLIT_SCALAR', 'GOW3_DEPTH_KEEP_CLEAR', 'GOW3_TINY_READBACK',
-               'GOW3_LDS_BARRIERS_MULTIWAVE', 'GOW3_VIDEO_INVALIDATE'}
+               'GOW3_LDS_BARRIERS_MULTIWAVE', 'GOW3_VIDEO_INVALIDATE', 'GOW3_SHADER_WAIT_MS'}
 # The Uncharted engines run at 60 at most, so higher limits would do nothing.
 FPS_LIMITS = [('0', ('Sem limite (60)', 'No limit (60)')), ('30', ('30', '30')), ('60', ('60', '60'))]
 # Fixed per game, never a user switch: UC1 needs LOW_IMAGE, AJM_END_RULES and EOP_TICK_WAIT; READBACKS
@@ -186,7 +205,7 @@ FIXED = {'GOW3_READBACKS', 'GOW3_FRAME_STATS', 'GOW3_LOW_IMAGE', 'GOW3_AJM_END_R
 # (uncharted_pc, GPL). Actions with their PS4 names, the default keys ("A|B": two bindings) and the
 # default controller buttons (SDL names). Without a saved Controls window the game keeps its own.
 BUTTON_ACTIONS = [
-    ('cross', ('X', 'Cross ✕'), 'Space', 'a'), ('circle', ('Círculo ○', 'Circle ○'), 'Left Ctrl|Q', 'b'),
+    ('cross', ('X', 'Cross ✕'), 'Space', 'a'), ('circle', ('Círculo ○', 'Circle ○'), 'Q|Left Ctrl', 'b'),
     ('square', ('Quadrado □', 'Square □'), 'F', 'x'), ('triangle', ('Triângulo △', 'Triangle △'), 'E', 'y'),
     ('l1', ('L1', 'L1'), 'G', 'leftshoulder'), ('r1', ('R1', 'R1'), 'R', 'rightshoulder'),
     ('l2', ('L2 (mirar)', 'L2 (aim)'), 'Mouse Right', 'lefttrigger'),
@@ -221,7 +240,7 @@ PAD_BUTTONS = [('a', ('A / X', 'A / Cross')), ('b', ('B / Círculo', 'B / Circle
                ('paddle2', ('Paddle 2', 'Paddle 2')), ('paddle3', ('Paddle 3', 'Paddle 3')),
                ('paddle4', ('Paddle 4', 'Paddle 4')), ('none', ('Nenhum', 'Not assigned'))]
 CONTROL_DEFAULTS = {'mouse_look': True, 'mouse_sensitivity': 1.0, 'mouse_aim_sensitivity': 1.0, 'mouse_invert_y': False,
-                    'pad_invert_y': False, 'key_icons': False, 'keys': {}, 'pad': {}}
+                    'pad_invert_y': False, 'vibration': True, 'key_icons': False, 'keys': {}, 'pad': {}}
 # Keyboard icons (Controls window): the game files redrawn with the player's keys, by game, as paths in
 # the game folder, and the fonts tried for the key names (Windows first). data.psarc holds the font the
 # texts draw buttons with (scripts/key_icons.py), the pak the HUD's button pictures (scripts/hud_icons.py).
@@ -237,7 +256,7 @@ ICON_STREAM_FILES = {'uc1': ('u1data/build/main/texturedict1/ps4/chunk-1-tstrm.p
 ICON_FONTS = [Path(os.environ.get('WINDIR', r'C:\Windows')) / 'Fonts' / name
               for name in ('arialbd.ttf', 'arial.ttf', 'segoeuib.ttf')] + \
              [Path('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf')]
-KEY_ICONS_VERSION = 5  # raise when key_icons.py draws differently, so old copies are made again
+KEY_ICONS_VERSION = 6  # raise when key_icons.py draws differently, so old copies are made again
 # Controls > icons in the game: the game's own PlayStation buttons, Xbox buttons in the game's style or the keys.
 ICON_STYLES = ('ps', 'xbox', 'keys')
 
@@ -433,7 +452,8 @@ def write_input_ini(controls):
              f"mouse_sensitivity={float(controls.get('mouse_sensitivity') or 1.0):.2f}",
              f"mouse_aim_sensitivity={float(controls.get('mouse_aim_sensitivity') or 1.0):.2f}",
              f"mouse_invert_y={1 if controls.get('mouse_invert_y') else 0}",
-             f"pad_invert_y={1 if controls.get('pad_invert_y') else 0}"]
+             f"pad_invert_y={1 if controls.get('pad_invert_y') else 0}",
+             f"vibration={0 if controls.get('vibration') is False else 1}"]
     lines += [f'key.{action}={keys[action]}' for action in DEFAULT_KEYS]
     lines += [f'pad.{action}={pad[action]}' for action in DEFAULT_PAD]
     INPUT_FILE.write_text('\n'.join(lines) + '\n', encoding='utf-8')
@@ -462,7 +482,7 @@ def adopt_menu_controls(settings):
             controls.setdefault('keys', {})[key[4:]] = value
         elif key.startswith('pad.') and key[4:] in DEFAULT_PAD:
             controls.setdefault('pad', {})[key[4:]] = value
-        elif key in ('mouse_look', 'mouse_invert_y', 'pad_invert_y'):
+        elif key in ('mouse_look', 'mouse_invert_y', 'pad_invert_y', 'vibration'):
             controls[key] = value == '1'
         elif key in ('mouse_sensitivity', 'mouse_aim_sensitivity'):
             try:
@@ -482,13 +502,13 @@ def launcher_option(name):
         name = 'GOW3_' + name[3:]
     elif not name.startswith('GOW3_'):
         return False
-    managed = set(COMMON) | set(EXPERIMENTAL) | set(TOGGLE_HELP)
+    managed = set(COMMON) | set(EXPERIMENTAL) | set(DEBUG) | set(TOGGLE_HELP)
     for game in GAMES:
         managed |= set(game[4])
     for values in UC3_RESOLUTION_ENV.values():
         managed |= set(values)
     managed |= {'GOW3_GAME_DIR', 'GOW3_PATCH_DIR', 'GOW3_EXECUTABLE', 'GOW3_DATA_DIR', 'GOW3_USER_DIR',
-                'GOW3_INPUT_CONFIG', 'GOW3_UC3_RT_MB', 'GOW3_ICON_ROOT', 'GOW3_ICON_FILES', 'GOW3_ICON_ERROR'}
+                'GOW3_INPUT_CONFIG', 'GOW3_UC3_RT_MB', 'GOW3_ICON_ROOT', 'GOW3_ICON_FILES', 'GOW3_ICON_ERROR', 'GOW3_MENU_WASD'}
     return name in managed
 
 
@@ -551,6 +571,9 @@ def game_environment(settings, key):
     for name in settings.get('experimental', []):
         if name in EXPERIMENTAL and key in EXPERIMENTAL[name][0]:
             env[name] = EXPERIMENTAL[name][1]  # turned on in Options > Advanced
+    for name, (games, value) in DEBUG.items():
+        if key in games and name not in settings.get('disabled', []):
+            env[name] = value
     if 'GOW3_SCALAR_COPY_HLE' not in env:
         env.pop('GOW3_HLE_INVALIDATE', None)
     if key in ('uc1', 'uc2', 'uc3'):
@@ -573,6 +596,8 @@ def game_environment(settings, key):
     if made:
         env['GOW3_ICON_ROOT'] = str(USER_DIR / 'icones')
         env['GOW3_ICON_FILES'] = ';'.join(made)
+        if icon_style(settings.get('controls') or {}) == 'keys':
+            env['GOW3_MENU_WASD'] = '1'  # menu "select" shows WASD, not the d-pad (weapon keys)
     if errors:
         env['GOW3_ICON_ERROR'] = '; '.join(errors)  # printed by the game in the log
     for name, value in os.environ.items():
@@ -1129,7 +1154,8 @@ class Launcher:
                                                     if ini.get('fps_limit', '0') in limit_values else 0])
         res_values = [v for v, _n in RESOLUTIONS]
         resolution = tk.StringVar(value=pick(RESOLUTIONS)[res_values.index(self.settings.get('resolution', '1080'))
-                                                          if self.settings.get('resolution', '1080') in res_values else 0])
+                                                          if self.settings.get('resolution', '1080') in res_values
+                                                          else res_values.index('1080')])
         vsync = tk.BooleanVar(value=ini.get('vsync', '1') != '0')
         fps = tk.BooleanVar(value=ini.get('overlay_fps', '1') != '0' and ini.get('show_fps', '1') != '0')
         rows = ((_('Tela', 'Display'), ttk.Combobox(body, values=pick(DISPLAY_MODES), state='readonly', width=18, textvariable=mode)),
@@ -1182,6 +1208,10 @@ class Launcher:
         for name in EXPERIMENTAL:
             trials[name] = tk.BooleanVar(value=name in chosen)
             toggle(fix_list, name, trials[name])
+        self.label(fix_list, _('Debug', 'Debug'), 10, ACCENT, True).pack(anchor='w', pady=(10, 4))
+        for name in DEBUG:
+            toggles[name] = tk.BooleanVar(value=name not in disabled)
+            toggle(fix_list, name, toggles[name])
         # Open when it was left open; older launcher.json files: open when something differs from the default.
         shown = tk.BooleanVar(value=self.settings.get('show_advanced', bool(disabled) or bool(chosen)))
 
@@ -1204,7 +1234,7 @@ class Launcher:
             fps.set(True)
             updates.set(True)
             limit.set(pick(FPS_LIMITS)[0])
-            resolution.set(pick(RESOLUTIONS)[0])
+            resolution.set(pick(RESOLUTIONS)[res_values.index('1080')])
 
         def save():
             ensure_ini({'display_mode': DISPLAY_MODES[pick(DISPLAY_MODES).index(mode.get())][0],
@@ -1352,6 +1382,9 @@ class Launcher:
         pad_invert = tk.BooleanVar(value=bool(self.ctl['pad_invert_y']))
         put(tk.Checkbutton(body, text=_('Inverter o analógico direito na vertical', 'Invert the right stick vertically'),
                            variable=pad_invert, **check), 6)
+        vibration = tk.BooleanVar(value=self.ctl.get('vibration') is not False)
+        put(tk.Checkbutton(body, text=_('Vibração do controle', 'Controller vibration'),
+                           variable=vibration, **check))
 
         def reset_pad():
             for action, box in pad_boxes.items():
@@ -1369,7 +1402,7 @@ class Launcher:
         def save():
             self.ctl.update(mouse_look=look.get(), mouse_sensitivity=round(sensitivity.get(), 2),
                             mouse_aim_sensitivity=round(aim_sensitivity.get(), 2),
-                            mouse_invert_y=invert.get(), pad_invert_y=pad_invert.get(), icons=icons.get(),
+                            mouse_invert_y=invert.get(), pad_invert_y=pad_invert.get(), vibration=vibration.get(), icons=icons.get(),
                             key_icons=icons.get() == 'keys')
             self.ctl['keys'] = {a: v for a, v in self.ctl['keys'].items() if v != DEFAULT_KEYS[a]}
             self.ctl['pad'] = {a: values[b.current()] for a, b in pad_boxes.items()

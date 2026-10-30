@@ -42,6 +42,64 @@ int32_t runtime_guest_errno(int e) {
 static int32_t fail_posix(int e) { *runtime_errno()=runtime_guest_errno(e); return -1; }
 
 /* ---- clocks and sleeping ---- */
+/* GOW3_TIME_CALLERS=1 (diagnostics, off by default): counts guest calls to the clock functions by
+ * clock and return address, and every 2 s prints the busiest callers with calls/s. Used to find
+ * where a game takes its frame time from. */
+enum { TC_CLOCK_GETTIME, TC_PROCESS_TIME, TC_PROCESS_COUNTER, TC_TSC, TC_GETTIMEOFDAY, TC_KINDS };
+static const char *const time_caller_names[TC_KINDS]={"clock_gettime","GetProcessTime","GetProcessTimeCounter","ReadTsc","gettimeofday"};
+typedef struct { uintptr_t key; uint32_t count; uint32_t clock; } TimeCaller;
+static TimeCaller time_callers[1024];
+static int time_callers_on=-1;
+static uint64_t time_callers_since;
+static void time_caller_print(uint64_t now) {
+    static pthread_mutex_t print_lock=PTHREAD_MUTEX_INITIALIZER;
+    if (pthread_mutex_trylock(&print_lock)) return;
+    const double seconds=(double)(now-time_callers_since)/1e9;
+    time_callers_since=now;
+    TimeCaller top[16]; int n=0;
+    for (size_t i=0;i<sizeof(time_callers)/sizeof(time_callers[0]);++i) {
+        TimeCaller c=time_callers[i];
+        c.count=__atomic_exchange_n(&time_callers[i].count,0,__ATOMIC_RELAXED);
+        if (!c.key || !c.count) continue;
+        int at;
+        if (n<16) at=n++;
+        else if (top[15].count>=c.count) continue;
+        else at=15;
+        top[at]=c;
+        while (at>0 && top[at-1].count<top[at].count) { TimeCaller t=top[at-1]; top[at-1]=top[at]; top[at]=t; --at; }
+    }
+    for (int i=0;i<n;++i) {
+        const int kind=(int)(top[i].key&7);
+        printf("Time callers: %s from %#llx (clock %u): %.1f/s\n",time_caller_names[kind],
+               (unsigned long long)(top[i].key&~(uintptr_t)7),top[i].clock,top[i].count/seconds);
+    }
+    pthread_mutex_unlock(&print_lock);
+}
+static void time_caller(int kind,void *ret,uint32_t clock) {
+    if (time_callers_on<0) { const char *e=getenv("GOW3_TIME_CALLERS"); time_callers_on=e && e[0]=='1'; }
+    if (!time_callers_on) return;
+    /* The return address keyed with the kind in its low 3 bits (call sites are never that close). */
+    const uintptr_t real=((uintptr_t)ret&~(uintptr_t)7)|(uintptr_t)kind;
+    size_t slot=(size_t)((real>>3)*0x9e3779b97f4a7c15ull>>54)&1023;
+    for (int probe=0;probe<32;++probe,slot=(slot+1)&1023) {
+        uintptr_t seen=__atomic_load_n(&time_callers[slot].key,__ATOMIC_RELAXED);
+        if (!seen) {
+            uintptr_t expected=0;
+            if (__atomic_compare_exchange_n(&time_callers[slot].key,&expected,real,0,__ATOMIC_RELAXED,__ATOMIC_RELAXED)) seen=real;
+            else seen=expected;
+        }
+        if (seen==real) {
+            time_callers[slot].clock=clock;
+            __atomic_add_fetch(&time_callers[slot].count,1,__ATOMIC_RELAXED);
+            break;
+        }
+    }
+    struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t);
+    const uint64_t now=(uint64_t)t.tv_sec*1000000000u+(uint64_t)t.tv_nsec;
+    if (!time_callers_since) time_callers_since=now;
+    else if (now-time_callers_since>=2000000000u) time_caller_print(now);
+}
+#define TIME_CALLER(kind,clock) time_caller(kind,__builtin_return_address(0),clock)
 static struct timespec process_start;
 __attribute__((constructor)) static void remember_start(void) { clock_gettime(CLOCK_MONOTONIC,&process_start); }
 static int host_clock(uint32_t id,clockid_t *out) {
@@ -64,9 +122,11 @@ static int clock_read(uint32_t id,GuestTimespec *ts) {
     ts->sec=t.tv_sec; ts->nsec=t.tv_nsec; return 0;
 }
 static ABI int32_t kernel_clock_gettime(uint32_t id,GuestTimespec *ts) {
+    TIME_CALLER(TC_CLOCK_GETTIME,id);
     int e=clock_read(id,ts); return e ? ERR(runtime_guest_errno(e)) : 0;
 }
 static ABI int32_t posix_clock_gettime(uint32_t id,GuestTimespec *ts) {
+    TIME_CALLER(TC_CLOCK_GETTIME,id);
     int e=clock_read(id,ts); return e ? fail_posix(e) : 0;
 }
 static ABI int32_t posix_clock_getres(uint32_t id,GuestTimespec *ts) {
@@ -77,15 +137,17 @@ static ABI int32_t posix_clock_getres(uint32_t id,GuestTimespec *ts) {
     return 0;
 }
 static ABI uint64_t process_time(void) {
+    TIME_CALLER(TC_PROCESS_TIME,0);
     struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t);
     return (uint64_t)(t.tv_sec-process_start.tv_sec)*1000000+(uint64_t)((t.tv_nsec-process_start.tv_nsec)/1000);
 }
 static ABI uint64_t process_time_counter(void) {
+    TIME_CALLER(TC_PROCESS_COUNTER,0);
     struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t);
     return (uint64_t)(t.tv_sec-process_start.tv_sec)*1000000000+(uint64_t)(t.tv_nsec-process_start.tv_nsec);
 }
 static ABI uint64_t process_time_frequency(void) { return 1000000000; }
-static ABI uint64_t read_tsc(void) { return __rdtsc(); }
+static ABI uint64_t read_tsc(void) { TIME_CALLER(TC_TSC,0); return __rdtsc(); }
 static uint64_t tsc_hz;
 static ABI uint64_t tsc_frequency(void) {
     if (!tsc_hz) {
@@ -140,6 +202,7 @@ static ABI int32_t kernel_gettimezone(GuestTimezone *tz) {
     return 0;
 }
 static ABI int32_t posix_gettimeofday(GuestTimeval *tv,GuestTimezone *tz) {
+    TIME_CALLER(TC_GETTIMEOFDAY,0);
     struct timeval t;
     gettimeofday(&t,NULL);
     if (tv) { tv->sec=t.tv_sec; tv->usec=t.tv_usec; }

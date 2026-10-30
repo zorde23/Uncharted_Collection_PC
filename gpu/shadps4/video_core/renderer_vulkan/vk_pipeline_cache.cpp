@@ -1224,8 +1224,76 @@ const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& p
     return it != graphics_pipelines.end() ? it->second.get() : nullptr;
 }
 
+// uc3: GOW3_SHADER_WAIT_MS=n - a draw whose shader or pipeline is still compiling in the
+// background waits for it, at most n ms of waiting per 100 ms, instead of being skipped. A skipped
+// draw hides the object for a frame or two the first time it is seen in a session (UC1 submarine
+// flicker); with the budget spent, the draw is skipped as before.
+static u32 ShaderWaitMs() {
+    static const u32 ms = [] {
+        const char* env = std::getenv("GOW3_SHADER_WAIT_MS");
+        const u32 v = env ? u32(std::strtoul(env, nullptr, 10)) : 0u;
+        if (v) {
+            std::printf("Pipeline cache: draws wait for compiling shaders, up to %u ms per 100 ms\n",
+                        v);
+        }
+        return v;
+    }();
+    return ms;
+}
+
+bool PipelineCache::WaitPendingCompiles() {
+    const u32 budget_ms = ShaderWaitMs();
+    if (!budget_ms || !compiler || (pending_programs.empty() && pending_graphics.empty())) {
+        return false;
+    }
+    using Clock = std::chrono::steady_clock;
+    const auto start = Clock::now();
+    if (start - shader_wait_window > std::chrono::milliseconds{100}) {
+        shader_wait_window = start;
+        shader_wait_spent = {};
+    }
+    const auto budget = std::chrono::milliseconds{budget_ms};
+    if (shader_wait_spent >= budget) {
+        return false;
+    }
+    const auto deadline = start + (budget - shader_wait_spent);
+    bool ready = true;
+    for (auto* program : pending_programs) {
+        if (program->pending && !program->pending->job.WaitUntil(deadline)) {
+            ready = false;
+            break;
+        }
+    }
+    for (auto it = pending_graphics.begin(); ready && it != pending_graphics.end(); ++it) {
+        ready = it.value()->job.WaitUntil(deadline);
+    }
+    shader_wait_spent += Clock::now() - start;
+    PublishShaders();
+    PublishGraphics();
+    return ready;
+}
+
 const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectParams params,
                                                            const PreparedDraw* prepared) {
+    // A new shader compiles first, then its pipeline: up to two waits before the draw has both.
+    for (u32 attempt = 0;; ++attempt) {
+        const u32 pending_before = g_gow3_pending_draws.load(std::memory_order_relaxed);
+        const auto* pipeline = GetGraphicsPipelineOnce(params, prepared);
+        if (pipeline || attempt == 3 ||
+            g_gow3_pending_draws.load(std::memory_order_relaxed) == pending_before ||
+            !WaitPendingCompiles()) {
+            return pipeline;
+        }
+        // The retry counts the draw again if it is still pending (the stats may reset meanwhile).
+        u32 count = g_gow3_pending_draws.load(std::memory_order_relaxed);
+        while (count && !g_gow3_pending_draws.compare_exchange_weak(count, count - 1,
+                                                                    std::memory_order_relaxed)) {
+        }
+    }
+}
+
+const GraphicsPipeline* PipelineCache::GetGraphicsPipelineOnce(const DrawIndirectParams params,
+                                                               const PreparedDraw* prepared) {
     const bool split = GfxPipeSplit();
     const u64 t0 = split ? __rdtsc() : 0;
     SeedWorkerCaches();

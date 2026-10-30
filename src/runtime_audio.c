@@ -289,10 +289,16 @@ static ABI int32_t audio_state(int32_t handle, PortState *state) {
     case 4: state->output=0x04; state->channel=1; state->volume=127; break; /* pad speaker */
     default: {
         /* GOW3_AUDIO_SURROUND=1: report the port's own channel count (7.1 for 8-channel ports);
-           the mix is folded to the device here. UC1's sound driver otherwise clamps to 2. */
+           the mix is folded to the device here. UC1's sound driver otherwise clamps to 2.
+           GOW3_AUDIO_SURROUND=auto (launcher): only when the Windows output has more than 2
+           channels, so stereo keeps the game's own stereo mix. */
         static int surround=-1;
-        if (surround<0) { const char *e=getenv("GOW3_AUDIO_SURROUND"); surround=e && e[0]=='1'; }
-        state->output=0x01; state->channel=(uint8_t)(p->channels>2 && !surround ? 2 : p->channels); break;
+        if (surround<0) {
+            const char *e=getenv("GOW3_AUDIO_SURROUND");
+            surround=!e ? 0 : e[0]=='1' ? 1 : !strcmp(e,"auto") ? 2 : 0;
+        }
+        const int on=surround==1 || (surround==2 && device_channels>2);
+        state->output=0x01; state->channel=(uint8_t)(p->channels>2 && !on ? 2 : p->channels); break;
     }
     }
     return 0;

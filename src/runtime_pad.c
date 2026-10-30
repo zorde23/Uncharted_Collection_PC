@@ -180,7 +180,7 @@ static int stick_keys[STICK_KEYS][2]={
     {SDL_SCANCODE_UP,-1}, {SDL_SCANCODE_DOWN,-1}, {SDL_SCANCODE_LEFT,-1}, {SDL_SCANCODE_RIGHT,-1},
 };
 /* Mouse settings from input.ini (mouse look stays off without one). */
-static struct { int look, invert_y, pad_invert_y; float sensitivity, aim_sensitivity; } mouse_cfg={0,0,0,1.0f,1.0f};
+static struct { int look, invert_y, pad_invert_y, vibration; float sensitivity, aim_sensitivity; } mouse_cfg={0,0,0,1,1.0f,1.0f};
 
 /* An SDL key name, "Mouse Left/Right/Middle/4/5" or "Wheel Up/Down"; -1 when unknown. */
 static int parse_key_source(const char *name) {
@@ -285,7 +285,7 @@ static volatile int input_reload; /* the port menu changed input.ini: read it ag
  * wheel d-pad up/down/left/right, IJKL right stick), then its lines change it:
  *   key.<action>=<key or mouse>|<second>  pad.<action>=<SDL gamepad button or lefttrigger/righttrigger>
  *   mouse_look=0/1  mouse_sensitivity=<x>  mouse_aim_sensitivity=<multiplier while L2 is held>
- *   mouse_invert_y=0/1  pad_invert_y=0/1
+ *   mouse_invert_y=0/1  pad_invert_y=0/1  vibration=0/1 (controller rumble, on unless 0)
  * Actions: the ps_names buttons and ls_up ls_down ls_left ls_right rs_up rs_down rs_left rs_right. */
 static void load_input(void) {
     const char *path=getenv("GOW3_INPUT_CONFIG");
@@ -308,6 +308,7 @@ static void load_input(void) {
     key_map=ini_keys;
     for (int i=0;i<STICK_KEYS;++i) { stick_keys[i][0]=ini_sticks[i]; stick_keys[i][1]=-1; }
     mouse_cfg.look=mouse_cfg.invert_y=mouse_cfg.pad_invert_y=0;
+    mouse_cfg.vibration=1;
     mouse_cfg.sensitivity=mouse_cfg.aim_sensitivity=1.0f;
     pthread_mutex_lock(&input_lock);
     input_count=0;
@@ -330,6 +331,7 @@ static void load_input(void) {
         else if (!strcmp(key,"mouse_aim_sensitivity")) mouse_cfg.aim_sensitivity=(float)atof(value);
         else if (!strcmp(key,"mouse_invert_y")) mouse_cfg.invert_y=atoi(value)!=0;
         else if (!strcmp(key,"pad_invert_y")) mouse_cfg.pad_invert_y=atoi(value)!=0;
+        else if (!strcmp(key,"vibration")) mouse_cfg.vibration=atoi(value)!=0;
         else if (!strncmp(key,"key.",4) || !strncmp(key,"pad.",4)) {
             const bool keyboard=key[0]=='k';
             const char *action=key+4;
@@ -1350,7 +1352,7 @@ static float aim_camera(uint64_t camera, size_t dir_at, size_t copy_at, size_t c
     if (!aim_enabled() || aim_off || !camera) return 0.0f;
     float *v=(float *)(uintptr_t)(camera+dir_at), *copy=(float *)(uintptr_t)(camera+copy_at);
     const float len=v[0]*v[0]+v[1]*v[1]+v[2]*v[2];
-    if (!(len>0.96f && len<1.04f) || !(v[1]>-0.9f && v[1]<0.9f) || SDL_fabsf(copy[0]-v[0])>1e-3f || SDL_fabsf(copy[1]-v[1])>1e-3f ||
+    if (!(len>0.96f && len<1.04f) || !(v[1]>-0.97f && v[1]<0.97f) || SDL_fabsf(copy[0]-v[0])>1e-3f || SDL_fabsf(copy[1]-v[1])>1e-3f ||
         SDL_fabsf(copy[2]-v[2])>1e-3f) {
         aim_good=0;
         if (++aim_bad==30) {
@@ -2684,229 +2686,10 @@ static void __attribute__((ms_abi)) u1_camera_manager(uint64_t rdi, uint64_t rsi
     }
     pthread_mutex_unlock(&camlist_lock);
 }
-/* GOW3_U1_PROBE_LOG=1 (UC1 1.02 diagnostics, white crates; Fable R.16.16): the probe lookup of an
- * object's light (image 0x4f70b0: rdi the SH out, esi the region count, rdx the region list, stride
- * 0x20: +0 position, +0x10 id; rcx the context, position at +0; r9 and the first stack argument
- * r9 the found-count out pointer; the first stack argument the region id to skip). A line each time the region
- * list changes (2000 at most) and every 5 s a count of the lookups (all and near the bunker crates). */
-int runtime_pad_mouse_camera(void);
-/* How many of the `want` bytes at `at` are readable. */
-static uint64_t probe_mapped(uint64_t at, uint64_t want) {
-    if (at<0x10000) return 0;
-#ifdef _WIN32
-    MEMORY_BASIC_INFORMATION info;
-    if (!VirtualQuery((void *)(uintptr_t)at,&info,sizeof(info)) || info.State!=MEM_COMMIT || (info.Protect&(PAGE_NOACCESS|PAGE_GUARD))) return 0;
-    const uint64_t end=(uint64_t)(uintptr_t)info.BaseAddress+info.RegionSize;
-    if (at+want>end) want=end-at;
-#endif
-    return want;
-}
-static uint64_t probe_sum(uint64_t at, uint64_t size) {
-    size=probe_mapped(at,size);
-    uint64_t h=0xcbf29ce484222325ull^size;
-    for (uint64_t i=0;i<size;++i) h=(h^*(const uint8_t *)(uintptr_t)(at+i))*0x100000001b3ull;
-    return h;
-}
-static void __attribute__((ms_abi)) u1_probe_callback(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t regs) {
-    (void)rdi; (void)image;
-    static pthread_mutex_t lock=PTHREAD_MUTEX_INITIALIZER;
-    static int list_lines;
-    static uint64_t beat_us, near_calls, all_calls;
-    const uint64_t *saved=(const uint64_t *)regs; /* +0x18 r9, +0x28 rdx, +0x30 rcx */
-    const uint64_t list=saved[0x28/8], ctx=saved[0x30/8];
-    const unsigned count=(unsigned)rsi;
-    if (ctx<0x10000 || (count && list<0x10000) || count>32) return;
-    const float *pos=(const float *)ctx;
-    uint64_t ids=0xcbf29ce484222325ull^(uint64_t)count;
-    for (unsigned i=0;i<count;++i) ids=(ids^*(const uint32_t *)(list+i*0x20+0x10))*0x100000001b3ull;
-    pthread_mutex_lock(&lock);
-    static uint64_t last_ids; /* the region list itself (one per frame, from 0x5efd20): every change */
-    ++all_calls;
-    const int at_crates=pos[0]>40.0f && pos[0]<110.0f && pos[1]>130.0f && pos[1]<165.0f && pos[2]>-3010.0f && pos[2]<-2960.0f;
-    if (at_crates) ++near_calls;
-    const uint64_t now=now_us();
-    if (!beat_us) beat_us=now;
-    if (now-beat_us>=5000000) { /* every 5 s: is the lookup still running for the crates' area? */
-        printf("U1 probe beat: t=%.3f calls %llu near crates %llu, list regions %u\n",now*1e-6,(unsigned long long)all_calls,(unsigned long long)near_calls,count);
-        all_calls=near_calls=0; beat_us=now;
-    }
-    if (ids!=last_ids && list_lines<2000) {
-        last_ids=ids;
-        ++list_lines;
-        char line[1024];
-        int n=snprintf(line,sizeof(line),"U1 probe list: t=%.3f regions %u:",now_us()*1e-6,count);
-        for (unsigned i=0;i<count && n<(int)sizeof(line)-48;++i) {
-            const float *rp=(const float *)(list+i*0x20);
-            n+=snprintf(line+n,sizeof(line)-n," %#x@(%.0f %.0f %.0f)",*(const uint32_t *)(list+i*0x20+0x10),rp[0],rp[1],rp[2]);
-        }
-        puts(line);
-    }
-    /* Each region's probe data ([list+0x18]: count at +0x1c, probes of 0xf0 bytes at +0x48, kd-tree at
-     * +0x60; Fable R.16.19): the pointers once, and a line each second when a checksum of the probes or of
-     * 64 KiB of the tree changes (does the game's probe data change while a crate turns white?). */
-    static uint64_t sum_us;
-    static struct { uint64_t data, probes, tree; } regions[8];
-    if (now-sum_us>=1000000) {
-        sum_us=now;
-        for (unsigned i=0;i<count && i<8;++i) {
-            const uint64_t data=*(const uint64_t *)(list+i*0x20+0x18);
-            if (probe_mapped(data,0x68)<0x68) continue;
-            const uint32_t probes=*(const uint32_t *)(uintptr_t)(data+0x1c);
-            const uint64_t at=*(const uint64_t *)(uintptr_t)(data+0x48), tree=*(const uint64_t *)(uintptr_t)(data+0x60);
-            const uint64_t a=probe_sum(at,(uint64_t)probes*0xf0), b=probe_sum(tree,0x10000);
-            if (regions[i].data!=data) printf("U1 probe data: t=%.3f region %u id %#x data %#llx probes %u at %#llx tree %#llx\n",now*1e-6,i,
-                                              *(const uint32_t *)(list+i*0x20+0x10),(unsigned long long)data,probes,(unsigned long long)at,(unsigned long long)tree);
-            if (regions[i].data!=data || regions[i].probes!=a || regions[i].tree!=b)
-                printf("U1 probe sum: t=%.3f region %u probes %016llx tree %016llx%s\n",now*1e-6,i,(unsigned long long)a,(unsigned long long)b,
-                       regions[i].data==data ? " CHANGED" : "");
-            regions[i].data=data; regions[i].probes=a; regions[i].tree=b;
-        }
-    }
-    pthread_mutex_unlock(&lock);
-}
-static const RuntimeGuestCallback u1_probe_hook=
-    {"U1 light probe lookup 0x4f70b0 (1.02)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 81 ec a8 08 00 00 4c 89 8d 10 f8",6,u1_probe_callback,NULL,0,5};
-/* The object's probe cache (Fable R.16.19, R.16.22): at the entry of the light blend 0x4f4ec0, rdi the
- * context (rsi the parameters): +0 the object position the lookup reads, +0x10 the scale applied to the
- * light block after the blend, +0x20 the cache at object+0x420, +0x28 the region id to skip, +0x40 flags
- * (0x8000000: copy the cache without a lookup). The cache: +0 list hash, +8 valid, +9 converged, +0x10
- * position, +0x20 9 SH rows of 16 bytes (L00 +0x20, L20 +0x80). For objects near the bunker crates (by
- * either position) and for any object with a bright L00 (> 0.15) or a scale outside 0.5..2, a line when
- * one is first seen, when flag 0x1000000, valid or converged change, and when L00, L20 or the scale move
- * by more than 10% + 0.01 (8000 at most; the frozen flag 0x8000000 flips every frame on moving objects). */
-static int u1_at_crates(const float *p) {
-    return p[0]>40.0f && p[0]<110.0f && p[1]>130.0f && p[1]<165.0f && p[2]>-3010.0f && p[2]<-2960.0f;
-}
-static void __attribute__((ms_abi)) u1_cache_callback(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14) {
-    (void)r14;
-    static pthread_mutex_t lock=PTHREAD_MUTEX_INITIALIZER;
-    static struct { uint64_t cache; uint32_t state; float v[7]; float y0; int fell; } seen[512];
-    static int lines;
-    if (lines>=8000 || probe_mapped(rdi,0x48)<0x48) return;
-    const uint64_t cache=*(const uint64_t *)(uintptr_t)(rdi+0x20);
-    if (probe_mapped(cache,0xb0)<0xb0) return;
-    const float *in=(const float *)(uintptr_t)rdi, *pos=(const float *)(uintptr_t)(cache+0x10), *row=(const float *)(uintptr_t)(cache+0x20);
-    const float scale=*(const float *)(uintptr_t)(rdi+0x10);
-    const float v[7]={row[0],row[1],row[2],row[24],row[25],row[26],scale};
-    const float l00=v[0]>v[1] ? (v[0]>v[2] ? v[0] : v[2]) : (v[1]>v[2] ? v[1] : v[2]);
-    if (!u1_at_crates(in) && !u1_at_crates(pos) && !(l00>0.15f) && scale>=0.5f && scale<=2.0f) return;
-    const uint32_t flags=*(const uint32_t *)(uintptr_t)(rdi+0x40);
-    const uint32_t state=(flags&0x1000000u ? 2u : 0u)|(uint32_t)*(const uint8_t *)(uintptr_t)(cache+8)<<8|
-                         (uint32_t)*(const uint8_t *)(uintptr_t)(cache+9)<<16;
-    const unsigned h=(unsigned)((cache>>4)*0x9e3779b97f4a7c15ull>>55);
-    pthread_mutex_lock(&lock);
-    const int fresh=seen[h].cache!=cache;
-    int moved=fresh || seen[h].state!=state;
-    for (int j=0;j<7 && !moved;++j) {
-        const float d=v[j]-seen[h].v[j], a=seen[h].v[j];
-        if ((d>0 ? d : -d)>0.10f*(a>0 ? a : -a)+0.01f) moved=1;
-    }
-    if (moved && lines<8000) {
-        printf("U1 probe cache: t=%.3f %#llx%s in %.2f %.2f %.2f cache pos %.2f %.2f %.2f scale %.3f regions %d skip %#x flags %#x valid %u converged %u "
-               "hash %#x block %#llx L00 %.4f %.4f %.4f L20 %.4f %.4f %.4f\n",now_us()*1e-6,(unsigned long long)cache,fresh ? " NEW" : "",in[0],in[1],in[2],pos[0],pos[1],
-               pos[2],scale,probe_mapped(rsi,0x20)==0x20 ? *(const int32_t *)(uintptr_t)(rsi+0x1c) : -1,*(const uint32_t *)(uintptr_t)(rdi+0x28),flags,state>>8&0xff,state>>16&0xff,*(const uint32_t *)(uintptr_t)cache,
-               (unsigned long long)*(const uint64_t *)(uintptr_t)(rdi+0x18),v[0],v[1],v[2],v[3],v[4],v[5]);
-        ++lines;
-    }
-    if (fresh) { seen[h].y0=pos[1]; seen[h].fell=0; }
-    else if (seen[h].fell<2 && pos[1]<seen[h].y0-(seen[h].fell ? 20.0f : 1.0f) && lines<8000) { /* Fable R.16.28: which object's light position falls */
-        ++seen[h].fell;
-        const uint64_t obj=cache-0x420;
-        if (probe_mapped(obj,0x420)==0x420) {
-            const uint64_t vtable=*(const uint64_t *)(uintptr_t)obj;
-            printf("U1 probe fall: t=%.3f cache %#llx obj %#llx vtable %#llx (image +%#llx) obj+0x1b8 %#x obj+0x418 %#x y0 %.2f y %.2f\n",
-                   now_us()*1e-6,(unsigned long long)cache,(unsigned long long)obj,(unsigned long long)vtable,
-                   (unsigned long long)(vtable>=image ? vtable-image : 0),*(const uint32_t *)(uintptr_t)(obj+0x1b8),
-                   *(const uint32_t *)(uintptr_t)(obj+0x418),seen[h].y0,pos[1]);
-            /* Fable: the light position is the centre of the local bounds +0x260/+0x270 through the
-             * object-to-world matrix +0x1d0 (translation +0x200); +0x2d0 a likely owner with a vtable. */
-            const float *tr=(const float *)(uintptr_t)(obj+0x200), *mn=(const float *)(uintptr_t)(obj+0x260), *mx=(const float *)(uintptr_t)(obj+0x270);
-            const uint64_t owner=*(const uint64_t *)(uintptr_t)(obj+0x2d0);
-            const uint64_t ovt=probe_mapped(owner,8)==8 ? *(const uint64_t *)(uintptr_t)owner : 0;
-            printf("U1 probe fall bounds: t=%.3f cache %#llx pass %d translation %.2f %.2f %.2f min %.2f %.2f %.2f max %.2f %.2f %.2f owner %#llx vtable %#llx (image +%#llx)\n",
-                   now_us()*1e-6,(unsigned long long)cache,seen[h].fell,tr[0],tr[1],tr[2],mn[0],mn[1],mn[2],mx[0],mx[1],mx[2],
-                   (unsigned long long)owner,(unsigned long long)ovt,(unsigned long long)(ovt>=image ? ovt-image : 0));
-            ++lines;
-        }
-    }
-    seen[h].cache=cache; seen[h].state=state;
-    for (int j=0;j<7;++j) seen[h].v[j]=v[j];
-    pthread_mutex_unlock(&lock);
-}
-static const RuntimeGuestCallback u1_cache_hook=
-    {"U1 light blend 0x4f4ec0 (1.02)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 81 ec b8 05 00 00 48 89 b5 a0 fa",6,u1_cache_callback,NULL,0,0};
-/* The probe region list builder 0x5efd20 (Fable R.16.23): rdi the list table, rsi 32 chunk slots of
- * 0x10 bytes ([+0x18] chunk, [+0x20] probe data), edx the view (0: chunks hidden by bit 0x200, else
- * 0x400). A chunk goes in the list when its flags word (chunk+0x11c, +0x120 on the render thread's copy)
- * has 2 set, no 4 and no view bit, and its data has probes. A line for every slot when any of that
- * changes (500 at most), so a bunker chunk left out of the list shows up. */
-static void __attribute__((ms_abi)) u1_chunks_callback(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t rdx) {
-    (void)rdi; (void)image;
-    static pthread_mutex_t lock=PTHREAD_MUTEX_INITIALIZER;
-    static uint64_t last[2];
-    static int lines;
-    if (probe_mapped(rsi,0x210)<0x210) return;
-    static int all_regions=-1;
-    if (all_regions<0) all_regions=getenv("GOW3_TEST_PROBE_ALL_REGIONS") && atoi(getenv("GOW3_TEST_PROBE_ALL_REGIONS"));
-    if (all_regions) { /* Fable: let the lower bunker chunk 0x5dfe9ee1 into the list even with the camera outside its volume */
-        static int told;
-        for (int i=0;i<32;++i) {
-            const uint64_t chunk=*(const uint64_t *)(uintptr_t)(rsi+i*0x10+0x18);
-            if (!chunk || probe_mapped(chunk,0x124)<0x124 || *(const uint32_t *)(uintptr_t)(chunk+0x100)!=0x5dfe9ee1u) continue;
-            uint16_t *w=(uint16_t *)(uintptr_t)(chunk+0x120);
-            if (*w&0x200) {
-                *w&=(uint16_t)~0x200u;
-                if (!told) { told=1; printf("U1 probe chunk: UC_TEST_PROBE_ALL_REGIONS clears 0x200 on chunk 0x5dfe9ee1 slot %d\n",i); }
-            }
-        }
-    }
-    if (lines>=500) return;
-    const unsigned view=(unsigned)rdx ? 1u : 0u;
-    const uint16_t mask=view ? 0x400 : 0x200;
-    uint64_t h=0xcbf29ce484222325ull;
-    for (int i=0;i<32;++i) {
-        const uint64_t chunk=*(const uint64_t *)(uintptr_t)(rsi+i*0x10+0x18), data=*(const uint64_t *)(uintptr_t)(rsi+i*0x10+0x20);
-        h=(h^chunk)*0x100000001b3ull; h=(h^data)*0x100000001b3ull;
-        if (probe_mapped(chunk,0x5c8)==0x5c8) {
-            h=(h^*(const uint16_t *)(uintptr_t)(chunk+0x11c))*0x100000001b3ull;
-            h=(h^*(const uint16_t *)(uintptr_t)(chunk+0x120))*0x100000001b3ull;
-            h=(h^*(const uint32_t *)(uintptr_t)(chunk+0xb0))*0x100000001b3ull;
-            h=(h^*(const uint32_t *)(uintptr_t)(chunk+0x5c4))*0x100000001b3ull;
-        }
-    }
-    pthread_mutex_lock(&lock);
-    if (h==last[view] || lines>=500) { pthread_mutex_unlock(&lock); return; }
-    last[view]=h;
-    const double t=now_us()*1e-6;
-    for (int i=0;i<32 && lines<500;++i) {
-        const uint64_t chunk=*(const uint64_t *)(uintptr_t)(rsi+i*0x10+0x18), data=*(const uint64_t *)(uintptr_t)(rsi+i*0x10+0x20);
-        if (!chunk || !data || probe_mapped(chunk,0x5c8)<0x5c8) continue;
-        const float *cp=(const float *)(uintptr_t)(chunk+0x90);
-        const uint16_t w0=*(const uint16_t *)(uintptr_t)(chunk+0x11c), w1=*(const uint16_t *)(uintptr_t)(chunk+0x120);
-        int count=-1;
-        uint64_t probes=0;
-        if (probe_mapped(data,0x50)==0x50) { count=*(const int32_t *)(uintptr_t)(data+0x1c); probes=*(const uint64_t *)(uintptr_t)(data+0x48); }
-        const int in0=!(w0&mask) && (w0&2) && !(w0&4) && count>0 && probes, in1=!(w1&mask) && (w1&2) && !(w1&4) && count>0 && probes;
-        printf("U1 probe chunk: t=%.3f view %u slot %d id %#x pos %.0f %.0f %.0f w11c %#x w120 %#x load %#x f5c4 %#x data %#llx probes %d %s\n",t,view,i,
-               *(const uint32_t *)(uintptr_t)(chunk+0x100),cp[0],cp[1],cp[2],w0,w1,
-               *(const uint32_t *)(uintptr_t)(chunk+0xb0),*(const uint32_t *)(uintptr_t)(chunk+0x5c4),(unsigned long long)data,count,
-               in0 && in1 ? "IN" : in0 ? "IN(11c)" : in1 ? "IN(120)" : "out");
-        ++lines;
-    }
-    pthread_mutex_unlock(&lock);
-}
-static const RuntimeGuestCallback u1_chunks_hook=
-    {"U1 probe region list 0x5efd20 (1.02)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 83 ec 68 48 89 b5 78 ff ff ff 49 89 fd",6,u1_chunks_callback,NULL,0,1};
 const RuntimeGuestCallback *runtime_guest_callbacks(size_t *count) {
     static RuntimeGuestCallback all[sizeof(guest_callbacks)/sizeof(*guest_callbacks)+sizeof(discover_callbacks)/sizeof(*discover_callbacks)+1+
-                                    sizeof(u1_census_callbacks)/sizeof(*u1_census_callbacks)+4];
+                                    sizeof(u1_census_callbacks)/sizeof(*u1_census_callbacks)+1];
     size_t n=0;
-    const char *probe=getenv("GOW3_U1_PROBE_LOG");
-    if (!runtime_pad_mouse_camera()) { /* mouse camera off: only the light probe log (GOW3_U1_PROBE_LOG) */
-        if (probe && probe[0]=='1') { all[n++]=u1_probe_hook; all[n++]=u1_cache_hook; all[n++]=u1_chunks_hook; }
-        *count=n;
-        return all;
-    }
     for (size_t i=0;i<sizeof(guest_callbacks)/sizeof(*guest_callbacks);++i)
         all[n++]=guest_callbacks[i];
     const char *on=getenv("GOW3_MOUSE_DISCOVER");
@@ -2918,7 +2701,6 @@ const RuntimeGuestCallback *runtime_guest_callbacks(size_t *count) {
     if (u1_census && u1_census[0]=='1')
         for (size_t i=0;i<sizeof(u1_census_callbacks)/sizeof(*u1_census_callbacks);++i) all[n++]=u1_census_callbacks[i];
     else if (u1_car_on()) all[n++]=u1_car_hook;
-    if (probe && probe[0]=='1') { all[n++]=u1_probe_hook; all[n++]=u1_cache_hook; all[n++]=u1_chunks_hook; }
     *count=n;
     return all;
 }
@@ -3279,7 +3061,7 @@ static ABI int32_t pad_vibration(int32_t handle, const uint8_t *param) {
     if (!param) return ERR_INVALID_ARG;
     pthread_mutex_lock(&lock);
     SDL_Gamepad *g=current_gamepad();
-    if (g) SDL_RumbleGamepad(g,(uint16_t)(param[0]*257),(uint16_t)(param[1]*257),1000);
+    if (g && mouse_cfg.vibration) SDL_RumbleGamepad(g,(uint16_t)(param[0]*257),(uint16_t)(param[1]*257),1000);
     pthread_mutex_unlock(&lock);
     return 0;
 }

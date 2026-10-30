@@ -74,13 +74,25 @@ Uncharted 1 came later almost for free, and the goal is now the whole trilogy.
 
 ## Status
 
-Updated 2026-10-27.
+Updated 2026-10-30.
 
 | Game | Executable | Status |
 |---|---|---|
 | Uncharted 1 | `eboot.bin` | **Playable**, at **60 FPS** with sound (gunshots included); still has some crashes |
 | Uncharted 2 | `big2-ps4_Shipping.elf` | **Playable**, 51–60 FPS, with its own saves; still has some crashes |
 | Uncharted 3 | `big3-ps4_Shipping.elf` | **100% playable from start to end**, at **60 FPS in 1080p, with no upscaling or frame generation**. Some parts still need optimization and drop below 60 (around 50 in heavy vegetation, the Chateau), always staying above 30 FPS. One crash in the whole playthrough, not reproduced or fixed yet. Known issues listed below |
+
+New in 0.3.8:
+- UC2: the train prologue works at 60 FPS. Drake ran too slowly there, so the carriage fell before he reached the jump. The rooftop chase now also stays at 60 FPS.
+- Aiming no longer blurs the whole background at resolutions other than 1080p (UC2 and UC3). The autofocus measured a point off the crosshair, often on Drake.
+- New resolutions: 1280x720 and 1600x900.
+- Objects no longer flicker or vanish for a moment the first time they appear (for example the UC1 submarine): a draw now waits briefly for its shader instead of being skipped.
+- Mouse: in UC2, looking far up or down while hanging no longer switches the camera to stick-like movement.
+- Controls: new option to turn off controller vibration.
+- Keyboard icons: the menus show W A S D, the left stick prompt shows your four movement keys, and the dodge/back key is Q by default.
+- 5.1/7.1 sound is now automatic: on when Windows is set to surround, stereo mix otherwise (no longer Experimental).
+- Dumps that come with the developer menu turned on no longer show the debug text on screen.
+- Options > Advanced, Experimental: the faster draw preparation (A1) can now be turned on in UC1 too.
 
 New in 0.3.7:
 - **Update from the launcher**: when a new version is out, the "Update now" button downloads and installs it, keeping saves and settings (works from this version on).
@@ -125,7 +137,6 @@ Known issues:
 **Uncharted 3**
 - **One crash in a full playthrough, not fixed yet.** It could not be reproduced. A likely cause is a GPU driver timeout after long sessions: the port can send a very large block of memory (~1.5 GB) to the GPU in one go, the frame stalls and Windows/AMD closes the game. Save often.
 - **Short dips in 1% low FPS where shadow maps are rebuilt.** A shadow map array is rebuilt one layer at a time instead of reused (frames of 25-50 ms). The dark flash on walls and the flickering lights these rebuilds caused are fixed (`UC_DEPTH_KEEP_CLEAR`). Seen in The Citadel (chapter at 37%).
-- **Brief texture flicker the first time you enter a new area.** New shaders are compiled in the background, and objects using them are skipped for a few frames. Shaders are cached, so it does not repeat on later visits.
 - **Some parts still need optimization.** FPS drops below 60 in a few places (heavy vegetation such as The Chateau runs around 50), always above 30. The limit is the emulated GPU command processor on the CPU.
 - The game is locked to 60 FPS. Higher frame rates speed up the game logic.
 - Upscaling (FSR/DLSS) does not work for Uncharted: the inherited hooks are specific to God of War III. 1440p and 4K render natively instead (see above).
@@ -133,11 +144,12 @@ Known issues:
 
 **Uncharted 2**
 - **Scenery textures can flicker in 4K** (and possibly 1440p). Not seen in 1080p so far. Not fixed yet.
-- In the train prologue the carriage can fall too early, so you may need to jump sooner than on PS4. UC2 runs without `UC_COMPUTE_PIPE` for this reason. If the train still fails, turn off `UC_HLE_INORDER` and `UC_ACB_DISPATCH_PIPE` in the launcher (Options > Advanced) for that part; they keep the rooftop chase at 60 FPS.
+- Train prologue (fixed in 0.3.8): with `UC_READBACK_ASYNC` and `UC_READBACK_SIDEQ` on, Drake walked and ran about 35% slower at 60 FPS, so the carriage fell before he reached the jump. The cause was the native constant copies racing the game; UC2 now keeps those two on and runs the copies into the train's range on the GPU (`UC_SCALAR_COPY_GPU_RANGE`).
+- **Character physics:** a few reports of Drake getting stuck inside objects (seen at the start of chapter 6). Being investigated.
 - Lightly tested. Please report missing sounds or visual bugs.
 
 **Uncharted 1**
-- In the bunker, some pieces of broken crates can turn too bright a while later. Being investigated.
+- In the bunker, some pieces of broken crates can turn too bright a while later. This is the game's own bug: it happens on PS4 too.
 - Lightly tested. Please report missing sounds or visual bugs.
 
 The project log (in Portuguese), with what was done and why, is in
@@ -199,7 +211,7 @@ Double-click the game's `.bat` in `windows\`:
 | `config.bat` | Paths (MSYS2, game, update) and the recommended optimization list |
 | `compilar.bat` | Builds the port |
 | `jogar_uc3.bat` | Uncharted 3 with the optimizations (60 FPS) |
-| `jogar_uc2.bat` | Uncharted 2 (without `UC_COMPUTE_PIPE`, because of the train) |
+| `jogar_uc2.bat` | Uncharted 2 (with `UC_SCALAR_COPY_GPU_RANGE`, because of the train) |
 | `jogar_uc1.bat` | Uncharted 1 |
 | `fechar_jogo.bat` | Closes the game if it hangs |
 
@@ -237,8 +249,8 @@ Every new optimization goes in **off by default** in the code; the launcher and 
 | `UC_MOUSE_EDGE_AIM` | The mouse turns the camera while aiming from a ledge or a climb, and at the hanging spots where the aim used to turn slowly (UC3) |
 | `UC_DEPTH_KEEP_CLEAR` | A shadow map array recreated with more layers keeps the pending depth clear of the image it replaces (fixes flickering lights, shadows and dark walls in UC3, e.g. the castle) |
 | `UC_SCOPE_SPLIT_SCALAR` | The shader translator runs a scalar instruction placed between the vector instructions of a divergent block for the whole wave, as the GPU does (fixes the black wedges and white specks in the fog of UC3's light cones) |
-| `UC_PREP_TRUST_A1` | Experimental, off in the launcher: draw preparation reuses work it can prove is still valid (about +5 FPS in the UC3 desert ruins) |
-| `UC_HLE_INORDER`, `UC_ACB_DISPATCH_PIPE` | Keep the UC2 rooftop chase at 60 FPS; turn them off if the train prologue fails |
+| `UC_PREP_TRUST_A1` | Experimental (UC1 and UC3), off in the launcher: draw preparation reuses work it can prove is still valid (about +5 FPS in the UC3 desert ruins) |
+| `UC_HLE_INORDER`, `UC_ACB_DISPATCH_PIPE` | Keep the UC2 rooftop chase at 60 FPS |
 
 The full list, with measurements, is in the [DEVLOG](docs/uc3/DEVLOG.md).
 

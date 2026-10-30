@@ -3879,6 +3879,7 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                     }();
                     if (watch_addr && vsharp.base_address < watch_addr + 0x20000 &&
                         vsharp.base_address + size > watch_addr) {
+                        Gow3Stats::watch_store_count.fetch_add(1, std::memory_order_relaxed);
                         static std::atomic<int> shown{0};
                         if (shown.fetch_add(1) < 200) {
                             std::printf("ucndc: watch buffer store shader %#x base %#llx size %#x\n",

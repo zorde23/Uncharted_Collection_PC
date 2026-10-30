@@ -48,8 +48,13 @@ static u32 TranslatedBinaryVersion() {
 // (GOW3_LDS_BARRIERS_MULTIWAVE, BilalReloaded) get a new name, so their binaries cached without
 // them are not found and only those shaders recompile.
 static std::string ShaderBinaryName(u64 pgm_hash, size_t perm_idx) {
-    return fmt::format("{:#018x}_{}{}", pgm_hash, perm_idx,
-                       Shader::Optimization::MultiwaveLdsBarriers(pgm_hash) ? "_lds4" : "");
+    std::string name = fmt::format("{:#018x}_{}{}", pgm_hash, perm_idx,
+                                   Shader::Optimization::MultiwaveLdsBarriers(pgm_hash) ? "_lds4" : "");
+    // uc3: GOW3_DOF_FOCUS_FIX: the aim focus shader translated for this resolution.
+    if (pgm_hash == Shader::DofFocusShaderHash && Shader::DofFocusFixKey()) {
+        name += fmt::format("_dof{:x}", Shader::DofFocusFixKey());
+    }
+    return name;
 }
 } // namespace Serialization
 

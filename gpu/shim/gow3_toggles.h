@@ -109,6 +109,8 @@ inline std::atomic<std::int64_t> flip_a_ns{0}, flip_b_ns{0}, flip_game_ns{0};
 // Per flip (ring of 16 by flip number): game submit, stage A decode, stage B reached.
 inline std::atomic<std::int64_t> flip_ring[3][16]{};
 inline std::atomic<std::uint32_t> flip_seq[3]{};
+// uc2 (train, GOW3_READBACK_VALUE): buffer stores recorded into the GOW3_WATCH_ADDR range.
+inline std::atomic<std::uint64_t> watch_store_count{0};
 inline void NoteFlipStage(int stage) {
     const std::int64_t now = std::chrono::steady_clock::now().time_since_epoch().count();
     const std::uint32_t n = flip_seq[stage].fetch_add(1, std::memory_order_relaxed);

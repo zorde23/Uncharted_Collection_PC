@@ -1111,11 +1111,11 @@ static void install_game_callbacks(const Segment *segments, uint64_t ns, uint64_
     }
     if (!installed) printf("Callbacks: no mouse camera code found, mouse uses the stick\n");
 }
-/* GOW3_SCREAM_LOG=1 (UC1 1.02 diagnostics): the game's sound engine (SCEA Scream) logs through
- * one function (0x3c0750) that drops messages above a verbosity kept in .bss (0) and hands the
+/* GOW3_SCREAM_LOG=1 (UC1 and UC2 1.02 diagnostics): the game's sound engine (SCEA Scream) logs through
+ * one function (UC1 0x3c0750, UC2 0x52d570) that drops messages above a verbosity kept in .bss (0) and hands the
  * rest to four optional callbacks, all NULL in the shipped game. The verbosity test is removed
  * and the first callback load reads a host printer. Checked against the exact code bytes. */
-static int scream_log_left=4000;
+static int scream_log_left=30000;
 static ABI void scream_log(const char *message, int level) {
     if (scream_log_left<=0) return;
     --scream_log_left;
@@ -1130,15 +1130,40 @@ static ABI void scream_report(const char *message) {
     size_t n=strlen(message);
     printf("Scream report: %s%s", message, n && message[n-1]=='\n' ? "" : "\n");
 }
+/* Code bytes and offsets per game: UC1 1.02, then UC2 1.02 (same Scream build; UC2 image offsets
+ * are vaddr - 0x400000). */
+static const struct {
+    const char *game;
+    unsigned char test[16], slot_load[7], gate[12], out[16];
+    uint64_t test_at, slot_load_at, slot, gate_at, out_at;
+} scream_sites[]={
+    {"UC1",
+     {0x48,0x8d,0x05,0xb6,0x0a,0x98,0x00,0x39,0x18,0x0f,0x8c,0xa4,0x00,0x00,0x00,0x48},
+     {0x48,0x8b,0x05,0xe7,0x74,0x9b,0x00},
+     {0x48,0x8d,0x05,0x84,0x20,0x9b,0x00,0x83,0x38,0x00,0x75,0x63},
+     {0x48,0x8d,0x05,0x85,0xb9,0x55,0x00,0x48,0x8d,0x3d,0x3e,0x20,0x9b,0x00,0xff,0x10},
+     0x3c07e3, 0x3c083a, 0xd77d28, 0x407b55, 0x407bb4},
+    {"UC2",
+     {0x48,0x8d,0x05,0x16,0x93,0xf5,0x00,0x39,0x18,0x0f,0x8c,0xa4,0x00,0x00,0x00,0x48},
+     {0x48,0x8b,0x05,0x47,0xfd,0xf8,0x00},
+     {0x48,0x8d,0x05,0x44,0xaf,0xf8,0x00,0x83,0x38,0x00,0x75,0x63},
+     {0x48,0x8d,0x05,0x85,0xf0,0xed,0x00,0x48,0x8d,0x3d,0xfe,0xae,0xf8,0x00,0xff,0x10},
+     0x12d603, 0x12d65a, 0x10bd3a8, 0x175325, 0x175384},
+};
 static void install_scream_log(uint64_t image_size) {
-    static const unsigned char test[]={0x48,0x8d,0x05,0xb6,0x0a,0x98,0x00,0x39,0x18,0x0f,0x8c,0xa4,0x00,0x00,0x00,0x48};
-    static const unsigned char slot_load[]={0x48,0x8b,0x05,0xe7,0x74,0x9b,0x00};
-    const uint64_t test_at=0x3c07e3, slot_load_at=0x3c083a, slot=0xd77d28;
-    if (slot+8>image_size || memcmp(image+test_at,test,sizeof(test)) ||
-        memcmp(image+slot_load_at,slot_load,sizeof(slot_load))) {
-        printf("Scream log: code not recognised (not UC1 1.02), off\n");
+    const size_t count=sizeof(scream_sites)/sizeof(scream_sites[0]);
+    size_t g=0;
+    for (;g<count;++g) {
+        if (scream_sites[g].slot+8<=image_size &&
+            !memcmp(image+scream_sites[g].test_at,scream_sites[g].test,sizeof(scream_sites[g].test)) &&
+            !memcmp(image+scream_sites[g].slot_load_at,scream_sites[g].slot_load,sizeof(scream_sites[g].slot_load)))
+            break;
+    }
+    if (g==count) {
+        printf("Scream log: code not recognised (not UC1 or UC2 1.02), off\n");
         return;
     }
+    const uint64_t test_at=scream_sites[g].test_at, slot_load_at=scream_sites[g].slot_load_at;
     /* The engine clears the four slots when it (re)initialises, so the first slot load
      * (mov rax, [rip+slot]) is pointed at a cell of our own instead. */
     unsigned char *cell=allocate(page_size);
@@ -1149,11 +1174,10 @@ static void install_scream_log(uint64_t image_size) {
     int32_t rel32=(int32_t)rel;
     memset(image+test_at+9,0x90,6); /* jl past the printing: every level prints */
     memcpy(image+slot_load_at+3,&rel32,4);
-    printf("Scream log: on (sound engine messages print as Scream[level])\n");
-    static const unsigned char gate[]={0x48,0x8d,0x05,0x84,0x20,0x9b,0x00,0x83,0x38,0x00,0x75,0x63};
-    static const unsigned char out[]={0x48,0x8d,0x05,0x85,0xb9,0x55,0x00,0x48,0x8d,0x3d,0x3e,0x20,0x9b,0x00,0xff,0x10};
-    const uint64_t gate_at=0x407b55, out_at=0x407bb4;
-    if (memcmp(image+gate_at,gate,sizeof(gate)) || memcmp(image+out_at,out,sizeof(out))) {
+    printf("Scream log: on for %s (sound engine messages print as Scream[level])\n",scream_sites[g].game);
+    const uint64_t gate_at=scream_sites[g].gate_at, out_at=scream_sites[g].out_at;
+    if (memcmp(image+gate_at,scream_sites[g].gate,sizeof(scream_sites[g].gate)) ||
+        memcmp(image+out_at,scream_sites[g].out,sizeof(scream_sites[g].out))) {
         printf("Scream report: code not recognised, off\n");
         return;
     }
@@ -1166,6 +1190,239 @@ static void install_scream_log(uint64_t image_size) {
     memcpy(image+out_at+3,&rel32,4);
     printf("Scream report: on\n");
 }
+/* UC2 1.02 state-script trace (GOW3_DC_TRACE=1, off by default): the natives the DC scripts
+ * call (go, send-event, animate, ...) are registered at init with `lea rax,[rip+func]`; each
+ * lea is pointed at a stub that prints the call, then jumps on to the native. A native gets
+ * edi = argc, rsi = 8-byte argument slots. Symbols print as hex (resolve them offline). */
+static const struct { const char *name; uint32_t site, func; } dc_trace_natives[]={
+    {"go",0xe3ecd3,0xe44290}, {"send-event",0x8c1786,0x8c1800}, {"animate",0x796e63,0x7969a0},
+    {"wait-animate",0x796ec7,0x797ab0}, {"wait",0xe3f4a3,0xe41270}, {"wait-for",0xe3f827,0xe3fb60},
+    {"signal",0xe3f6fb,0xe40220}, {"camera-animation-enable",0xdf7f14,0xe033b0},
+    {"camera-enable",0xdf5610,0xe0e5e0}, {"fall-to-death",0xd04d0b,0xd0c3d0},
+    {"kill-player",0xd04bdf,0xd0c5f0}, {"task-failed!",0xdfa494,0xdfe8f0},
+    {"player-disable-controls",0xd059ef,0xd09610}, {"camera-disable-all",0xdf57a0,0xe0e290},
+    {"do-rumble-ptr",0xdf4544,0xe105b0}, {"get-animation-phase",0x797057,0x7976a0},
+    {"print-float",0xdfab38,0xdfdef0}, {"print-string",0xdfac00,0xdfdea0},
+    {"player-in-region?",0xd04e37,0xd0bc10}, {"spawn-entity",0xdf68d0,0xdf3900},
+};
+static int dc_trace_left=300000;
+static double dc_trace_seconds(void) {
+#ifdef _WIN32
+    static LARGE_INTEGER frequency, start;
+    LARGE_INTEGER now;
+    if (!frequency.QuadPart) { QueryPerformanceFrequency(&frequency); QueryPerformanceCounter(&start); }
+    QueryPerformanceCounter(&now);
+    return (double)(now.QuadPart-start.QuadPart)/(double)frequency.QuadPart;
+#else
+    return 0.0;
+#endif
+}
+static ABI void dc_trace(int argc, const uint64_t *args, int id) {
+    if (dc_trace_left<=0) return;
+    --dc_trace_left;
+    char line[256];
+    int n=snprintf(line,sizeof(line),"DC t=%.3f %s argc=%d",dc_trace_seconds(),dc_trace_natives[id].name,argc);
+    for (int i=0; args && i<argc && i<6 && n>0 && n<(int)sizeof(line); ++i)
+        n+=snprintf(line+n,sizeof(line)-n," %" PRIx64,args[i]);
+    printf("%s\n",line);
+}
+static void install_dc_trace(uint64_t image_size) {
+    const size_t count=sizeof(dc_trace_natives)/sizeof(dc_trace_natives[0]), stub=64;
+    for (size_t i=0;i<count;++i) {
+        uint64_t at=dc_trace_natives[i].site-0x400000ull;
+        int32_t disp;
+        if (at+7>image_size || image[at]!=0x48 || image[at+1]!=0x8d || image[at+2]!=0x05) goto unknown;
+        memcpy(&disp,image+at+3,4);
+        if (at+7+(int64_t)disp!=dc_trace_natives[i].func-0x400000ull) goto unknown;
+    }
+    unsigned char *page=allocate(round_page(count*stub));
+    uintptr_t helper=(uintptr_t)dc_trace;
+    for (size_t i=0;i<count;++i) {
+        unsigned char *s=page+i*stub;
+        uintptr_t func=(uintptr_t)(image+dc_trace_natives[i].func-0x400000ull);
+        uint32_t id=(uint32_t)i;
+        /* push rax,rdi,rsi,rdx,rcx,r8,r9 (7 pushes: the call below sees an aligned stack) */
+        static const unsigned char save[]={0x50,0x57,0x56,0x52,0x51,0x41,0x50,0x41,0x51};
+        static const unsigned char restore[]={0x41,0x59,0x41,0x58,0x59,0x5a,0x5e,0x5f,0x58};
+        unsigned char *p=s;
+        memcpy(p,save,sizeof(save)); p+=sizeof(save);
+        *p++=0xba; memcpy(p,&id,4); p+=4;                        /* mov edx, id */
+        *p++=0x48; *p++=0xb8; memcpy(p,&helper,8); p+=8;          /* mov rax, dc_trace */
+        *p++=0xff; *p++=0xd0;                                     /* call rax */
+        memcpy(p,restore,sizeof(restore)); p+=sizeof(restore);
+        *p++=0xff; *p++=0x25; memset(p,0,4); p+=4;                /* jmp [rip+0] */
+        memcpy(p,&func,8);
+    }
+    for (size_t i=0;i<count;++i) {
+        uint64_t at=dc_trace_natives[i].site-0x400000ull;
+        int64_t rel=(int64_t)(uintptr_t)(page+i*stub)-(int64_t)(uintptr_t)(image+at+7);
+        if (rel!=(int32_t)rel) { printf("DC trace: no stub page within 2 GiB of the image, off\n"); return; }
+    }
+    protect(page,round_page(count*stub),5);
+    for (size_t i=0;i<count;++i) {
+        uint64_t at=dc_trace_natives[i].site-0x400000ull;
+        int32_t rel32=(int32_t)((int64_t)(uintptr_t)(page+i*stub)-(int64_t)(uintptr_t)(image+at+7));
+        memcpy(image+at+3,&rel32,4);
+    }
+    printf("DC trace: on (%u natives)\n",(unsigned)count);
+    return;
+unknown:
+    printf("DC trace: code not recognised (not UC2 1.02), off\n");
+}
+#ifdef _WIN32
+/* UC2 1.02 player position log (GOW3_PLAYER_POS=1, off by default): a thread reads the player
+ * handle the game keeps at 0x155bd20 (player-in-region? loads it at 0xd0bc50) every few ms and
+ * prints the player object's locators at +0xf0 and +0x110 (see get-object-position, 0xe12390)
+ * when they change. ReadProcessMemory never faults: a freed object is only a failed read. */
+static uintptr_t player_pos_handle;
+static int player_pos_read(uintptr_t at, void *out, size_t n) {
+    SIZE_T got=0;
+    return ReadProcessMemory(GetCurrentProcess(),(LPCVOID)at,out,n,&got) && got==n;
+}
+static DWORD WINAPI player_pos_thread(LPVOID unused) {
+    (void)unused;
+    float last[8]={0};
+    int left=300000;
+    while (left>0) {
+        Sleep(2);
+        uint64_t holder=0, object=0;
+        uint32_t id=0, object_id=0;
+        float v[8];
+        if (!player_pos_read(player_pos_handle,&holder,8) || !holder ||
+            !player_pos_read(player_pos_handle+8,&id,4) || !id) continue;
+        if (!player_pos_read(holder,&object,8) || !object ||
+            !player_pos_read(object+0x44,&object_id,4) || object_id!=id) continue;
+        if (!player_pos_read(object+0xf0,v,16) || !player_pos_read(object+0x110,v+4,16)) continue;
+        if (!memcmp(v,last,sizeof(v))) continue;
+        memcpy(last,v,sizeof(v));
+        --left;
+        printf("POS t=%.3f obj=%" PRIx64 " a=%.3f %.3f %.3f b=%.3f %.3f %.3f\n",dc_trace_seconds(),object,
+               v[0],v[1],v[2],v[4],v[5],v[6]);
+    }
+    return 0;
+}
+static void install_player_pos(uint64_t image_size) {
+    const uint64_t at=0xd0bc50-0x400000ull, handle=0x155bd20-0x400000ull;
+    int32_t disp;
+    if (handle+16>image_size || image[at]!=0x48 || image[at+1]!=0x8d || image[at+2]!=0x0d) goto unknown;
+    memcpy(&disp,image+at+3,4);
+    if (at+7+(int64_t)disp!=handle) goto unknown;
+    player_pos_handle=(uintptr_t)(image+handle);
+    dc_trace_seconds();
+    HANDLE thread=CreateThread(NULL,0,player_pos_thread,NULL,0,NULL);
+    if (!thread) { printf("Player position log: no thread, off\n"); return; }
+    CloseHandle(thread);
+    printf("Player position log: on\n");
+    return;
+unknown:
+    printf("Player position log: code not recognised (not UC2 1.02), off\n");
+}
+/* uc2 (Drake slow with READBACK_ASYNC): GOW3_DT_SCAN=1 looks for the game's frame time in its
+ * writable image data. In rounds of 20 s: 10 s of samples (every 200 ms) of every aligned float
+ * and double, then the slots that always held 0.004..0.05 and changed most are printed
+ * ("DT cand") and the top 8 watched every 1 ms for 10 s ("DT t=... <addr>=<value>" on change). */
+typedef struct { uint64_t start, size; } DtRange;
+static DtRange dt_ranges[16];
+static int dt_range_count;
+static int dt_read(uint64_t at, void *out, size_t n) {
+    SIZE_T got=0;
+    return ReadProcessMemory(GetCurrentProcess(),(LPCVOID)at,out,n,&got) && got==n;
+}
+typedef struct { uint64_t addr; int dbl; double mean, lo, hi; unsigned changes; } DtCand;
+static DWORD WINAPI dt_scan_thread(LPVOID unused) {
+    (void)unused;
+    uint64_t total=0;
+    for (int r=0;r<dt_range_count;++r) total+=dt_ranges[r].size;
+    const size_t slots=(size_t)(total/4);
+    unsigned char *in_f=calloc(slots,1), *ch_f=calloc(slots,1), *in_d=calloc(slots/2+1,1), *ch_d=calloc(slots/2+1,1);
+    float *sum_f=calloc(slots,sizeof(float)), *last_f=calloc(slots,sizeof(float));
+    double *sum_d=calloc(slots/2+1,sizeof(double)), *last_d=calloc(slots/2+1,sizeof(double));
+    unsigned char *buf=malloc(1<<16);
+    if (!in_f||!ch_f||!in_d||!ch_d||!sum_f||!last_f||!sum_d||!last_d||!buf) { printf("DT scan: out of memory\n"); return 0; }
+    for (int round=0;round<30;++round) {
+        memset(in_f,0,slots); memset(ch_f,0,slots); memset(in_d,0,slots/2+1); memset(ch_d,0,slots/2+1);
+        memset(sum_f,0,slots*sizeof(float)); memset(sum_d,0,(slots/2+1)*sizeof(double));
+        const int samples=50;
+        for (int k=0;k<samples;++k) {
+            size_t base=0;
+            for (int r=0;r<dt_range_count;++r) {
+                for (uint64_t off=0;off<dt_ranges[r].size;off+=1<<16) {
+                    const size_t n=(size_t)(dt_ranges[r].size-off<(1<<16)?dt_ranges[r].size-off:(1<<16));
+                    if (!dt_read(dt_ranges[r].start+off,buf,n)) continue;
+                    for (size_t i=0;i+4<=n;i+=4) {
+                        const size_t f=base+(size_t)(off+i)/4;
+                        float v; memcpy(&v,buf+i,4);
+                        if (v>=0.004f && v<=0.05f && in_f[f]<255) { ++in_f[f]; sum_f[f]+=v; }
+                        if (k && v!=last_f[f] && ch_f[f]<255) ++ch_f[f];
+                        last_f[f]=v;
+                        if (!(i&7) && i+8<=n) {
+                            const size_t d=f/2;
+                            double w; memcpy(&w,buf+i,8);
+                            if (w>=0.004 && w<=0.05 && in_d[d]<255) { ++in_d[d]; sum_d[d]+=w; }
+                            if (k && w!=last_d[d] && ch_d[d]<255) ++ch_d[d];
+                            last_d[d]=w;
+                        }
+                    }
+                }
+                base+=(size_t)(dt_ranges[r].size/4);
+            }
+            Sleep(200);
+        }
+        DtCand top[16]; int ntop=0;
+        size_t base=0;
+        for (int r=0;r<dt_range_count;++r) {
+            const size_t count=(size_t)(dt_ranges[r].size/4);
+            for (size_t j=0;j<count;++j) {
+                const size_t f=base+j;
+                for (int dbl=0;dbl<2;++dbl) {
+                    if (dbl && (j&1)) continue;
+                    const unsigned in=dbl?in_d[f/2]:in_f[f], ch=dbl?ch_d[f/2]:ch_f[f];
+                    if (in<samples || ch<10) continue;
+                    DtCand c={dt_ranges[r].start+j*4,dbl,(dbl?sum_d[f/2]:sum_f[f])/samples,0,0,ch};
+                    if (ntop==16 && top[15].changes>=ch) continue;
+                    const int at=ntop<16?ntop++:15;
+                    top[at]=c;
+                    for (int q=at;q>0 && top[q].changes>top[q-1].changes;--q) { DtCand t=top[q]; top[q]=top[q-1]; top[q-1]=t; }
+                }
+            }
+            base+=count;
+        }
+        printf("DT scan round %d: %d candidates\n",round,ntop);
+        for (int q=0;q<ntop;++q)
+            printf("DT cand %#" PRIx64 " %s mean %.5f changes %u/%d\n",top[q].addr-(uint64_t)(uintptr_t)image+0x400000ull,
+                   top[q].dbl?"double":"float",top[q].mean,top[q].changes,samples-1);
+        const int watch=ntop<8?ntop:8;
+        double last[8]={0};
+        const double t_end=dc_trace_seconds()+10.0;
+        while (watch && dc_trace_seconds()<t_end) {
+            Sleep(1);
+            for (int q=0;q<watch;++q) {
+                double v=0;
+                if (top[q].dbl) { if (!dt_read(top[q].addr,&v,8)) continue; }
+                else { float x; if (!dt_read(top[q].addr,&x,4)) continue; v=x; }
+                if (v==last[q]) continue;
+                last[q]=v;
+                printf("DT t=%.4f %#" PRIx64 "=%.6f\n",dc_trace_seconds(),top[q].addr-(uint64_t)(uintptr_t)image+0x400000ull,v);
+            }
+        }
+    }
+    return 0;
+}
+static void install_dt_scan(const Segment *segments, uint64_t count) {
+    for (uint64_t s=0;s<count && dt_range_count<16;++s) {
+        if (!(segments[s].flags&2) || (segments[s].flags&1) || !segments[s].size) continue;
+        dt_ranges[dt_range_count].start=(uint64_t)(uintptr_t)(image+segments[s].address);
+        dt_ranges[dt_range_count].size=(segments[s].size<(48ull<<20)?segments[s].size:(48ull<<20))&~7ull;
+        printf("DT scan: segment vaddr %#" PRIx64 " size %#" PRIx64 "\n",segments[s].address+0x400000ull,segments[s].size);
+        ++dt_range_count;
+    }
+    dc_trace_seconds();
+    HANDLE thread=dt_range_count?CreateThread(NULL,0,dt_scan_thread,NULL,0,NULL):NULL;
+    if (!thread) { printf("DT scan: off (no writable segment or thread)\n"); return; }
+    CloseHandle(thread);
+    printf("DT scan: on\n");
+}
+#endif
 /* Guest code reads its TCB with `mov rax, gs:[0]` (link_*.py rewrote fs:[0]); on Windows
  * the displacement becomes the TEB TLS slot that holds the guest TCB (runtime_thread.c). */
 uint32_t runtime_thread_tcb_offset(void);
@@ -2095,6 +2352,14 @@ int main(int argc, char **argv) {
         patch_eop_tick_wait(size);
     if (gpu_enabled && getenv("GOW3_SCREAM_LOG") && getenv("GOW3_SCREAM_LOG")[0]=='1')
         install_scream_log(size);
+    if (gpu_enabled && getenv("GOW3_DC_TRACE") && getenv("GOW3_DC_TRACE")[0]=='1')
+        install_dc_trace(size);
+#ifdef _WIN32
+    if (gpu_enabled && getenv("GOW3_PLAYER_POS") && getenv("GOW3_PLAYER_POS")[0]=='1')
+        install_player_pos(size);
+    if (gpu_enabled && getenv("GOW3_DT_SCAN") && getenv("GOW3_DT_SCAN")[0]=='1')
+        install_dt_scan(segments, ns);
+#endif
     if ((getenv("GOW3_JOB_SPIN") && getenv("GOW3_JOB_SPIN")[0]) || (getenv("GOW3_JOB_SLEEP") && getenv("GOW3_JOB_SLEEP")[0] == '1'))
         patch_job_spin(size, getenv("GOW3_JOB_SPIN") && getenv("GOW3_JOB_SPIN")[0] ? getenv("GOW3_JOB_SPIN") : NULL,
                        getenv("GOW3_JOB_SLEEP") && getenv("GOW3_JOB_SLEEP")[0] == '1');
@@ -2119,8 +2384,7 @@ int main(int argc, char **argv) {
     }
 #endif
     /* ucndc: mouse camera (input.ini with mouse_look=1; GOW3_MOUSE_CAMERA=0 keeps the mouse a stick) */
-    const char *probe_log=getenv("GOW3_U1_PROBE_LOG"); /* UC1 light probe log: its hook alone when the mouse camera is off */
-    if (gpu_enabled && (runtime_pad_mouse_camera() || (probe_log && probe_log[0]=='1'))) install_game_callbacks(segments, ns, size);
+    if (gpu_enabled && runtime_pad_mouse_camera()) install_game_callbacks(segments, ns, size);
     if (gpu_enabled && runtime_pad_mouse_camera()) install_call98_log(segments, ns, size);
 #ifdef _WIN32
     printf("Guest TCB loads redirected to the TEB TLS slot: %" PRIu64 "\n", patch_tcb_loads(segments, ns));

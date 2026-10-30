@@ -891,6 +891,172 @@ bool BufferCache::FastDoneReadback(VAddr device_addr, u64 size, bool is_write) {
     return true;
 }
 
+// uc3 (UC2 train diagnostics): GOW3_READBACK_VALUE=<hex address> prints, for each read fault on
+// that address's 4 KiB page, the 32 bytes at the address once the readback has landed, with the
+// path (async or sync) and a timestamp. Read through the backing view, so the page's protection
+// does not matter.
+struct ReadbackValueLog {
+    Core::MemoryManager* memory = nullptr;
+    VAddr address = 0;
+    bool async = false;
+    ~ReadbackValueLog() {
+        if (!address || !memory) {
+            return;
+        }
+        static std::atomic<int> left{20000};
+        if (left.fetch_sub(1, std::memory_order_relaxed) <= 0) {
+            return;
+        }
+        static const auto start = std::chrono::steady_clock::now();
+        const double t =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        unsigned long long v[4] = {0, 0, 0, 0};
+        memory->CopySparseMemoryBacking(address, reinterpret_cast<u8*>(v), sizeof(v));
+        // Flips submitted by the game / decoded (stage A) / recorded (stage B), and buffer
+        // stores into GOW3_WATCH_ADDR recorded so far: how far behind the game the GPU side is.
+        std::printf("RBV t=%.4f %s %#llx: %016llx %016llx flips %u %u %u stores %llu more %016llx %016llx\n",
+                    t, async ? "async" : "sync", (unsigned long long)address, v[0], v[1],
+                    Gow3Stats::flip_seq[0].load(std::memory_order_relaxed),
+                    Gow3Stats::flip_seq[1].load(std::memory_order_relaxed),
+                    Gow3Stats::flip_seq[2].load(std::memory_order_relaxed),
+                    (unsigned long long)Gow3Stats::watch_store_count.load(std::memory_order_relaxed), v[2],
+                    v[3]);
+    }
+};
+
+static VAddr ReadbackValueAddress() {
+    static const VAddr address = [] {
+        const char* env = std::getenv("GOW3_READBACK_VALUE");
+        return env ? VAddr(std::strtoull(env, nullptr, 16)) : VAddr(0);
+    }();
+    return address;
+}
+
+// uc2 (train): GOW3_READBACK_SYNC_ADAPTIVE=1 keeps the GOW3_READBACK_SYNC_RANGE reads synchronous
+// only while the game holds its frame rate (average of the last 4 game flips under
+// GOW3_READBACK_SYNC_ADAPTIVE_MS, default 17.5 ms). A slower average switches them to async; the
+// next try waits 3 s, doubling after each switch up to 60 s, and goes back to 3 s once the reads
+// stayed synchronous for 10 s. The synchronous wait is free when the frame has time to spare and
+// costs the frame rate when it has not (UC2 sewers).
+static bool ReadbackSyncAdaptiveAllows() {
+    static const bool enabled = EmulatorSettingsImpl::Flag("GOW3_READBACK_SYNC_ADAPTIVE", false);
+    if (!enabled) {
+        return true;
+    }
+    static const double limit_ms = [] {
+        const char* env = std::getenv("GOW3_READBACK_SYNC_ADAPTIVE_MS");
+        const double value = env ? std::atof(env) : 0.0;
+        return value > 0.0 ? value : 17.5;
+    }();
+    using Clock = std::chrono::steady_clock;
+    static std::atomic<std::int64_t> async_until{0}, sync_since{0};
+    static std::atomic<int> hold_s{3};
+    static std::atomic<u32> switches{0};
+    const std::int64_t now = Clock::now().time_since_epoch().count();
+    const std::int64_t until = async_until.load(std::memory_order_relaxed);
+    if (now < until) {
+        return false;
+    }
+    if (sync_since.load(std::memory_order_relaxed) < until) {
+        sync_since.store(now, std::memory_order_relaxed);
+    }
+    const u32 n = Gow3Stats::flip_seq[0].load(std::memory_order_relaxed);
+    if (n < 5) {
+        return true;
+    }
+    const std::int64_t newest = Gow3Stats::flip_ring[0][(n - 1) % 16].load(std::memory_order_relaxed);
+    const std::int64_t oldest = Gow3Stats::flip_ring[0][(n - 5) % 16].load(std::memory_order_relaxed);
+    const double avg_ms =
+        std::chrono::duration<double, std::milli>(Clock::duration(newest - oldest)).count() / 4.0;
+    const auto seconds = [](int s) {
+        return std::chrono::duration_cast<Clock::duration>(std::chrono::seconds(s)).count();
+    };
+    if (avg_ms <= limit_ms) {
+        if (now - sync_since.load(std::memory_order_relaxed) > seconds(10)) {
+            hold_s.store(3, std::memory_order_relaxed);
+        }
+        return true;
+    }
+    const int hold = hold_s.load(std::memory_order_relaxed);
+    async_until.store(now + seconds(hold), std::memory_order_relaxed);
+    hold_s.store(std::min(hold * 2, 60), std::memory_order_relaxed);
+    const u32 k = switches.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (k <= 40 || (k & 63) == 0) {
+        std::printf("uc3: sync range reads go async for %d s (frame avg %.1f ms): %u\n", hold,
+                    avg_ms, k);
+    }
+    return false;
+}
+
+// uc3 (UC2 train diagnostics): GOW3_READBACK_SYNC_RANGE=lo-hi[;lo-hi...] (hex GPU addresses)
+// makes read faults inside those ranges take the synchronous path while the rest stay async.
+static bool InReadbackSyncRange(VAddr address) {
+    static const std::vector<std::pair<VAddr, VAddr>> ranges = [] {
+        std::vector<std::pair<VAddr, VAddr>> out;
+        const char* env = std::getenv("GOW3_READBACK_SYNC_RANGE");
+        while (env && *env) {
+            char* end = nullptr;
+            const VAddr lo = std::strtoull(env, &end, 16);
+            if (!end || *end != '-') {
+                break;
+            }
+            const VAddr hi = std::strtoull(end + 1, &end, 16);
+            if (hi > lo) {
+                out.emplace_back(lo, hi);
+                std::printf("uc3: readbacks in [%#llx, %#llx) stay synchronous\n",
+                            (unsigned long long)lo, (unsigned long long)hi);
+            }
+            env = end && *end == ';' ? end + 1 : nullptr;
+        }
+        return out;
+    }();
+    for (const auto& [lo, hi] : ranges) {
+        if (address >= lo && address < hi) {
+            return ReadbackSyncAdaptiveAllows();
+        }
+    }
+    return false;
+}
+
+// uc3 (UC2 train diagnostics): GOW3_READBACK_PAGES=1 counts the CPU's read faults on GPU-written
+// memory by 4 KiB page, split into the async and synchronous paths, and every 2 s prints the
+// busiest pages with faults/s. Finds which readback a slow-down depends on.
+static void NoteReadbackPage(VAddr device_addr, u64 size, bool is_write, bool async) {
+    static const bool enabled = EmulatorSettingsImpl::Flag("GOW3_READBACK_PAGES", false);
+    if (!enabled) {
+        return;
+    }
+    struct Row {
+        u64 async = 0, sync = 0, writes = 0, max_size = 0;
+    };
+    static std::mutex mutex;
+    static std::unordered_map<VAddr, Row> rows;
+    static auto since = std::chrono::steady_clock::now();
+    std::scoped_lock lk{mutex};
+    auto& row = rows[device_addr & ~VAddr{0xfff}];
+    ++(async ? row.async : row.sync);
+    row.writes += is_write;
+    row.max_size = std::max(row.max_size, size);
+    const auto now = std::chrono::steady_clock::now();
+    const double seconds = std::chrono::duration<double>(now - since).count();
+    if (seconds < 2.0) {
+        return;
+    }
+    since = now;
+    std::vector<std::pair<VAddr, Row>> top(rows.begin(), rows.end());
+    rows.clear();
+    std::sort(top.begin(), top.end(), [](const auto& a, const auto& b) {
+        return a.second.async + a.second.sync > b.second.async + b.second.sync;
+    });
+    std::printf("Readback pages: %zu pages in %.1f s\n", top.size(), seconds);
+    for (size_t i = 0; i < top.size() && i < 12; ++i) {
+        const Row& r = top[i].second;
+        std::printf("Readback page %#llx: %.1f/s async, %.1f/s sync, %llu writes, up to %llu bytes\n",
+                    (unsigned long long)top[i].first, r.async / seconds, r.sync / seconds,
+                    (unsigned long long)r.writes, (unsigned long long)r.max_size);
+    }
+}
+
 void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool assume_locks,
                              bool from_fault) {
     struct FaultDiag {
@@ -1094,6 +1260,19 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
                 std::printf("uc3: async compute window read synchronously: %u\n", n);
             }
         }
+    }
+    if (async && InReadbackSyncRange(device_addr)) {
+        async = false;
+    }
+    if (from_fault) {
+        NoteReadbackPage(device_addr, size, is_write, async);
+    }
+    ReadbackValueLog value_log;
+    if (from_fault && ReadbackValueAddress() &&
+        (device_addr & ~VAddr{0xfff}) == (ReadbackValueAddress() & ~VAddr{0xfff})) {
+        value_log.memory = memory;
+        value_log.address = ReadbackValueAddress();
+        value_log.async = async;
     }
     if (!async) {
         (assume_locks ? Gow3Stats::uc3_rb_sync_gpu

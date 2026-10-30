@@ -7,6 +7,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <chrono>
+#include <mutex>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 #include "core/memory.h"
 #include "gow3_write_log.h"
@@ -367,6 +371,86 @@ static bool CopyGuestThroughBacking(Rasterizer& rasterizer, VAddr dst, VAddr src
     return written;
 }
 
+// uc2 (train, Drake slow with READBACK_ASYNC): GOW3_SCALAR_COPY_GPU_RANGE=lo-hi[;lo-hi...] (hex)
+// leaves copies whose destination starts in one of these ranges to the GPU dispatch.
+// GOW3_SCALAR_COPY_STATS=1 prints, every 5 s, the guest copies by 1 MiB destination region
+// (copies/s, bytes of the last one, source of the last one; GOW3_SCALAR_COPY_STATS_SHIFT sets the
+// region size): finds which copies matter.
+static bool ScalarCopyDstOnGpu(VAddr dst) {
+    static const std::vector<std::pair<VAddr, VAddr>> ranges = [] {
+        std::vector<std::pair<VAddr, VAddr>> out;
+        const char* env = std::getenv("GOW3_SCALAR_COPY_GPU_RANGE");
+        while (env && *env) {
+            char* end = nullptr;
+            const VAddr lo = std::strtoull(env, &end, 16);
+            if (!end || *end != '-') {
+                break;
+            }
+            const VAddr hi = std::strtoull(end + 1, &end, 16);
+            if (hi > lo) {
+                out.emplace_back(lo, hi);
+                std::printf("uc3: scalar copies into [%#llx, %#llx) stay on the GPU\n",
+                            static_cast<unsigned long long>(lo), static_cast<unsigned long long>(hi));
+            }
+            env = end && *end == ';' ? end + 1 : nullptr;
+        }
+        return out;
+    }();
+    for (const auto& [lo, hi] : ranges) {
+        if (dst >= lo && dst < hi) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void NoteScalarGuestCopy(VAddr src, VAddr dst, u64 size) {
+    static const bool enabled = [] {
+        const char* env = std::getenv("GOW3_SCALAR_COPY_STATS");
+        return env && env[0] == '1';
+    }();
+    if (!enabled) {
+        return;
+    }
+    struct Row {
+        u64 count = 0, size = 0;
+        VAddr src = 0, dst = 0;
+    };
+    static std::mutex mutex;
+    static std::unordered_map<VAddr, Row> rows;
+    static auto last = std::chrono::steady_clock::now();
+    // GOW3_SCALAR_COPY_STATS_SHIFT=N: regions of 2^N bytes instead of 1 MiB.
+    static const int shift = [] {
+        const char* env = std::getenv("GOW3_SCALAR_COPY_STATS_SHIFT");
+        const int value = env ? std::atoi(env) : 0;
+        return value >= 8 && value <= 30 ? value : 20;
+    }();
+    std::scoped_lock lk{mutex};
+    auto& row = rows[dst >> shift];
+    ++row.count;
+    row.size = size;
+    row.src = src;
+    row.dst = dst;
+    const auto now = std::chrono::steady_clock::now();
+    const double seconds = std::chrono::duration<double>(now - last).count();
+    if (seconds < 5.0) {
+        return;
+    }
+    last = now;
+    std::vector<std::pair<VAddr, Row>> sorted(rows.begin(), rows.end());
+    std::sort(sorted.begin(), sorted.end(),
+              [](const auto& a, const auto& b) { return a.second.count > b.second.count; });
+    std::printf("Scalar copies: %zu destination regions in %.1f s\n", sorted.size(), seconds);
+    for (size_t i = 0; i < sorted.size() && i < 32; ++i) {
+        const auto& r = sorted[i].second;
+        std::printf("Scalar copy region %#llx: %.1f/s, last %llu bytes %#llx -> %#llx\n",
+                    static_cast<unsigned long long>(sorted[i].first << shift), r.count / seconds,
+                    static_cast<unsigned long long>(r.size), static_cast<unsigned long long>(r.src),
+                    static_cast<unsigned long long>(r.dst));
+    }
+    rows.clear();
+}
+
 static bool ExecuteScalarCopyHLE(const Shader::Info& info, const AmdGpu::ComputeProgram& cs_program,
                                  Rasterizer& rasterizer, u64 group_size) {
     static std::atomic<u32> rejects{0};
@@ -414,6 +498,9 @@ static bool ExecuteScalarCopyHLE(const Shader::Info& info, const AmdGpu::Compute
     if (!memory->IsValidGpuMapping(src.base_address, size) ||
         !memory->IsValidGpuMapping(dst.base_address, size)) {
         return reject("mapping");
+    }
+    if (ScalarCopyDstOnGpu(dst.base_address)) {
+        return false;
     }
     auto& buffer_cache = rasterizer.GetBufferCache();
     // uc3 (GOW3_HLE_READBACK_WAIT=1): an async buffer readback clears the source's GPU marks when
@@ -495,6 +582,7 @@ static bool ExecuteScalarCopyHLE(const Shader::Info& info, const AmdGpu::Compute
     }
     // The GPU's copy of the destination is refreshed from guest memory when next used.
     buffer_cache.InvalidateMemory(dst.base_address, size, true);
+    NoteScalarGuestCopy(src.base_address, dst.base_address, size);
     report(guest_only, "guest copy, dispatch skipped");
     return true;
 }

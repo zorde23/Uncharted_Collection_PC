@@ -153,6 +153,8 @@ public:
 
     const GraphicsPipeline* GetGraphicsPipeline(const DrawIndirectParams params = {},
                                                 const PreparedDraw* prepared = nullptr);
+    const GraphicsPipeline* GetGraphicsPipelineOnce(const DrawIndirectParams params,
+                                                    const PreparedDraw* prepared);
 
     /// gow3: worker side of draw preparation: selects the pipeline key for `sel.regs` without
     /// creating anything. False when a program or permutation does not exist yet.
@@ -220,6 +222,9 @@ private:
                      std::optional<Shader::StageSpecialization> specialization = {});
     void PublishShaders(bool wait = false);
     void PublishGraphics(bool wait = false);
+    bool WaitPendingCompiles();
+    std::chrono::steady_clock::time_point shader_wait_window{};
+    std::chrono::steady_clock::duration shader_wait_spent{};
     void FinishCompilations();
     void SeedWorkerCaches();
     bool CheckCacheProfile();

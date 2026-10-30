@@ -125,6 +125,10 @@ public:
             future.wait();
         }
     }
+    /// uc3: true when the job is done (or never started) by `deadline`.
+    bool WaitUntil(std::chrono::steady_clock::time_point deadline) const {
+        return !future.valid() || future.wait_until(deadline) == std::future_status::ready;
+    }
     std::optional<T> Poll() {
         if (!future.valid() || future.wait_for(std::chrono::seconds{0}) != std::future_status::ready) {
             return std::nullopt;

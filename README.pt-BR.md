@@ -72,13 +72,25 @@ vieram depois quase de graça, e agora o objetivo é a trilogia inteira.
 
 ## Situação
 
-Atualizado em 27/10/2026.
+Atualizado em 30/10/2026.
 
 | Jogo | Executável | Situação |
 |---|---|---|
 | Uncharted 1 | `eboot.bin` | **Jogável**, a **60 FPS**, com som (inclusive os tiros); ainda com alguns travamentos |
 | Uncharted 2 | `big2-ps4_Shipping.elf` | **Jogável**, 51–60 FPS, com saves próprios; ainda com alguns travamentos |
 | Uncharted 3 | `big3-ps4_Shipping.elf` | **100% jogável do início ao fim**, a **60 FPS em 1080p, sem upscaling nem geração de quadros**. Algumas partes ainda precisam de otimização e caem abaixo de 60 (perto de 50 com muita vegetação, no Castelo), sempre acima de 30 FPS. Um único travamento no jogo inteiro, ainda não reproduzido nem corrigido. Problemas conhecidos listados abaixo |
+
+Novo na 0.3.8:
+- UC2: o prólogo do trem funciona a 60 FPS. O Drake corria devagar demais ali, e o vagão caía antes de ele chegar ao pulo. A perseguição no telhado também ficou em 60 FPS.
+- Mirar não borra mais o fundo inteiro em resoluções diferentes de 1080p (UC2 e UC3). O foco automático media um ponto fora da mira, muitas vezes em cima do Drake.
+- Novas resoluções: 1280x720 e 1600x900.
+- Objetos não piscam nem somem por um instante na primeira vez que aparecem (por exemplo o submarino do UC1): o desenho espera um pouco pelo shader em vez de ser pulado.
+- Mouse: no UC2, olhar muito para cima ou para baixo pendurado não faz mais a câmera virar analógica.
+- Controles: nova opção para desligar a vibração do controle.
+- Ícones de teclado: os menus mostram W A S D, o ícone do analógico esquerdo mostra as suas quatro teclas de movimento e a tecla de esquivar/voltar é Q por padrão.
+- O som 5.1/7.1 agora é automático: liga quando o Windows está em surround e usa a mixagem estéreo nos outros casos (saiu do Experimental).
+- Dumps que vêm com o menu de desenvolvedor ligado não mostram mais o texto de debug na tela.
+- Opções > Avançado, Experimental: o preparo de desenhos mais rápido (A1) agora pode ser ligado no UC1 também.
 
 Novo na 0.3.7:
 - **Atualizar pelo launcher**: quando sai versão nova, o botão "Atualizar agora" baixa e instala sozinho, mantendo saves e configurações (vale a partir desta versão).
@@ -124,7 +136,6 @@ Problemas conhecidos:
 **Uncharted 3**
 - **Um travamento no jogo inteiro, ainda sem correção.** Não foi possível reproduzir. Uma causa provável é o timeout do driver de vídeo depois de sessões longas: o port pode mandar de uma vez um bloco muito grande de memória (~1,5 GB) para a GPU, o quadro trava e o Windows/AMD fecha o jogo. Salve com frequência.
 - **Quedas curtas no 1% low onde mapas de sombra são refeitos.** Um array de mapas de sombra é refeito uma camada por vez em vez de reaproveitado (quadros de 25-50 ms). As paredes escurecendo e as luzes piscando que isso causava foram corrigidas (`UC_DEPTH_KEEP_CLEAR`). Visto na Cidadela (capítulo em 37%).
-- **Texturas piscam rapidamente na primeira vez que se entra numa área nova.** Shaders novos são compilados em segundo plano, e os objetos que os usam são pulados por alguns quadros. Os shaders ficam em cache, então isso não se repete nas próximas visitas.
 - **Algumas partes ainda precisam de otimização.** O FPS cai abaixo de 60 em alguns lugares (com muita vegetação, como no Castelo, fica perto de 50), sempre acima de 30. O limite é o processador de comandos da GPU emulado na CPU.
 - O jogo é travado em 60 FPS. Taxas maiores aceleram a lógica do jogo.
 - Upscaling (FSR/DLSS) não funciona no Uncharted: os ganchos herdados são específicos do God of War III. No lugar, 1440p e 4K renderizam nativo (veja acima).
@@ -132,11 +143,12 @@ Problemas conhecidos:
 
 **Uncharted 2**
 - **Texturas do cenário podem piscar em 4K** (e talvez em 1440p). Em 1080p não foi visto até agora. Ainda sem correção.
-- No prólogo do trem o vagão pode cair cedo demais, então talvez seja preciso pular antes do que no PS4. Por isso o UC2 roda sem `UC_COMPUTE_PIPE`. Se o trem continuar falhando, desligue `UC_HLE_INORDER` e `UC_ACB_DISPATCH_PIPE` no launcher (Opções > Avançado) nessa parte; elas deixam a perseguição nos telhados a 60 FPS.
+- Prólogo do trem (corrigido na 0.3.8): com `UC_READBACK_ASYNC` e `UC_READBACK_SIDEQ` ligadas, o Drake andava e corria uns 35% mais devagar a 60 FPS, e o vagão caía antes de ele chegar ao pulo. A causa eram as cópias de constantes em código nativo disputando com o jogo; o UC2 agora mantém as duas ligadas e faz na GPU as cópias para a faixa do trem (`UC_SCALAR_COPY_GPU_RANGE`).
+- **Física do personagem:** alguns relatos do Drake ficando preso dentro de objetos (visto no começo do capítulo 6). Em investigação.
 - Pouco testado. Avise se faltar algum som ou aparecer algum defeito.
 
 **Uncharted 1**
-- No bunker, alguns pedaços de caixas quebradas podem ficar claros demais um tempo depois. Em investigação.
+- No bunker, alguns pedaços de caixas quebradas podem ficar claros demais um tempo depois. É bug do próprio jogo: acontece no PS4 também.
 - Pouco testado. Avise se faltar algum som ou aparecer algum defeito.
 
 O diário do projeto, com o que foi feito e por quê, está em [docs/uc3/DEVLOG.md](docs/uc3/DEVLOG.md).
@@ -196,7 +208,7 @@ Dê dois cliques no `.bat` do jogo, dentro de `windows\`:
 | `config.bat` | Caminhos (MSYS2, jogo, atualização) e a lista de otimizações recomendadas |
 | `compilar.bat` | Compila o port |
 | `jogar_uc3.bat` | Uncharted 3 com as otimizações (60 FPS) |
-| `jogar_uc2.bat` | Uncharted 2 (sem `UC_COMPUTE_PIPE`, por causa do trem) |
+| `jogar_uc2.bat` | Uncharted 2 (com `UC_SCALAR_COPY_GPU_RANGE`, por causa do trem) |
 | `jogar_uc1.bat` | Uncharted 1 |
 | `fechar_jogo.bat` | Fecha o jogo se ele travar |
 
@@ -234,8 +246,8 @@ ligam o conjunto testado. Todas também valem com o prefixo antigo `GOW3_`
 | `UC_MOUSE_EDGE_AIM` | O mouse gira a câmera ao mirar pendurado num beiral ou escalando, e nos pontos pendurado onde a mira girava devagar (UC3) |
 | `UC_DEPTH_KEEP_CLEAR` | Um array de mapas de sombra recriado com mais camadas mantém a limpeza de profundidade pendente da imagem que ele substitui (corrige luzes, sombras e paredes escuras piscando no UC3, por exemplo no castelo) |
 | `UC_SCOPE_SPLIT_SCALAR` | O tradutor de shaders executa para a wave inteira uma instrução escalar que fica entre as instruções vetoriais de um bloco divergente, como a GPU faz (corrige as cunhas pretas e o chuvisco branco na névoa dos cones de luz do UC3) |
-| `UC_PREP_TRUST_A1` | Experimental, desligado no launcher: o preparo dos desenhos reaproveita o trabalho que consegue provar que continua válido (uns +5 FPS nas ruínas do deserto no UC3) |
-| `UC_HLE_INORDER`, `UC_ACB_DISPATCH_PIPE` | Deixam a perseguição nos telhados do UC2 a 60 FPS; desligue se o prólogo do trem falhar |
+| `UC_PREP_TRUST_A1` | Experimental (UC1 e UC3), desligado no launcher: o preparo dos desenhos reaproveita o trabalho que consegue provar que continua válido (uns +5 FPS nas ruínas do deserto no UC3) |
+| `UC_HLE_INORDER`, `UC_ACB_DISPATCH_PIPE` | Deixam a perseguição nos telhados do UC2 a 60 FPS |
 
 A lista completa, com medições, está no [DEVLOG](docs/uc3/DEVLOG.md).
 
